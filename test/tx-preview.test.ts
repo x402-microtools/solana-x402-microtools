@@ -60,7 +60,7 @@ test("base64 and base58 auto-detect; RPC always receives base64", async () => {
   assert.equal(decodeTransaction(base58.encode(t)).encoding, "base58");
   let sent: unknown;
   const orig = globalThis.fetch;
-  globalThis.fetch = (async (_u: unknown, init: RequestInit) => { sent = JSON.parse(String(init.body)); return Response.json({ jsonrpc: "2.0", id: 1, result: { context: { slot: 1 }, value: sim({ preBalances: [10, 0, 1], postBalances: [10, 0, 1] }) } }); }) as typeof fetch;
+  globalThis.fetch = (async (_u: unknown, init: RequestInit) => { sent ??= JSON.parse(String(init.body)); return Response.json({ jsonrpc: "2.0", id: 1, result: { context: { slot: 1 }, value: sim({ preBalances: [10, 0, 1], postBalances: [10, 0, 1] }) } }); }) as typeof fetch;
   try { await previewTransaction("https://rpc.test", { tx: decodeTransaction(base58.encode(t)).tx, encoding: "base58" }); }
   finally { globalThis.fetch = orig; }
   const p = (sent as { params: [string, Record<string, unknown>] }).params;
@@ -176,6 +176,8 @@ test("app: GET -> 405, bad POST body -> free 400 (no 402 challenge)", async () =
   assert.equal(g.status, 405); assert.equal(g.headers.get("Allow"), "POST");
   const p = await app.request("/api/tx-preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: body({ transaction: "AAAA" }) }, env);
   assert.equal(p.status, 400); assert.equal(p.headers.get("PAYMENT-REQUIRED"), null);
+  const bi = await app.request("/api/tx-preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: body({ transaction: toBase64(solTransfer(1n)), context: { type: "stock" } }) }, env);
+  assert.equal(bi.status, 400); assert.equal(bi.headers.get("PAYMENT-REQUIRED"), null);
   const ct = await app.request("/api/tx-preview", { method: "POST", body: body({ transaction: "AAAA" }) }, env);
   assert.equal(ct.status, 415);
   const other = await app.request("/api/weather?city=london", { method: "POST" }, env);

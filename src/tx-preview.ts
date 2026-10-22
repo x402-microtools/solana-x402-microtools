@@ -3,6 +3,10 @@ import { base58 } from "@scure/base";
 import { rpc, RpcError } from "./rpc";
 import { BadTransaction, decodeTransaction, toBase64, type ParsedTx } from "./tx-preview-wire";
 import { analyze, type SimValue } from "./tx-preview-analysis";
+import { briefRequestFields, briefInputJsonSchema, briefOutputJsonSchema } from "./brief-schemas";
+import { buildBrief } from "./brief";
+import { parseIntent } from "./intent";
+import type { EquityContext } from "./equities";
 export const MAX_BODY_BYTES = 8192;
 export class TxPreviewError extends Error {
   constructor(public readonly status: 400 | 413 | 415 | 502 | 504, message: string) { super(message); this.name = "TxPreviewError"; }
@@ -11,9 +15,10 @@ const pubkey = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).refine((s) => {
 export const txPreviewBodySchema = z.object({
   transaction: z.string().min(1).max(2200),
   wallet: pubkey.optional(),
-  encoding: z.enum(["base64", "base58"]).optional()
+  encoding: z.enum(["base64", "base58"]).optional(),
+  ...briefRequestFields
 }).strict();
-export type TxPreviewInput = { tx: ParsedTx; wallet?: string; encoding: "base64" | "base58" };
+export type TxPreviewInput = { tx: ParsedTx; wallet?: string; encoding: "base64" | "base58"; intent?: string; context?: EquityContext };
 /** Free pre-payment validation: content type, size, JSON shape and full wire-format parse. Never touches the network. */
 export function parseTxPreviewBody(contentType: string | undefined, raw: string): TxPreviewInput {
   if (!/^application\/json\b/i.test(contentType ?? "")) throw new TxPreviewError(415, "Content-Type must be application/json");
@@ -27,7 +32,7 @@ export function parseTxPreviewBody(contentType: string | undefined, raw: string)
   }
   try {
     const { tx, encoding } = decodeTransaction(parsed.data.transaction.trim(), parsed.data.encoding);
-    return { tx, wallet: parsed.data.wallet, encoding };
+    return { tx, wallet: parsed.data.wallet, encoding, intent: parsed.data.intent, context: parsed.data.context };
   } catch (e) {
     throw new TxPreviewError(400, `Invalid transaction: ${e instanceof BadTransaction ? e.message : "malformed"}`);
   }
@@ -49,9 +54,13 @@ export async function previewTransaction(rpcUrl: string, input: TxPreviewInput) 
     if (e instanceof RpcError) throw new TxPreviewError(e.status === 400 ? 400 : e.status === 504 ? 504 : 502, e.message);
     throw e;
   }
-  const out = analyze(input.tx, result.value!, input.wallet);
+  // Report the intent recipient's token deltas too (reporting only; red-flag ownership rules are unchanged).
+  const pi = parseIntent(input.intent);
+  const reportOwners = pi?.kind === "send" && pi.recipient_valid ? [pi.recipient!] : [];
+  const { facts, ...out } = analyze(input.tx, result.value!, input.wallet, { reportOwners });
+  const briefed = await buildBrief(out, facts, { intent: input.intent, context: input.context }, rpcUrl);
   return {
-    ...out,
+    ...briefed,
     slot: typeof result.context?.slot === "number" ? result.context.slot : null,
     input_encoding: input.encoding,
     source: "solana-mainnet-rpc simulateTransaction (sigVerify=false, replaceRecentBlockhash=true)",
@@ -65,11 +74,12 @@ export const txPreviewInputJsonSchema = {
   properties: {
     transaction: { type: "string", maxLength: 2200, description: "Serialized Solana transaction (legacy or v0), signed or UNSIGNED (all-zero signature slots), max 1232 bytes, base64 or base58" },
     wallet: { type: "string", description: "Optional: your wallet address, to highlight its balance changes (defaults to the fee payer)" },
-    encoding: { type: "string", enum: ["base64", "base58"], description: "Optional; auto-detected if omitted" }
+    encoding: { type: "string", enum: ["base64", "base58"], description: "Optional; auto-detected if omitted" },
+    ...briefInputJsonSchema
   }
 } as const;
 export const txPreviewOutputJsonSchema = {
-  type: "object", required: ["success", "summary", "sol_changes", "token_changes", "programs", "red_flags", "fee_estimate_lamports", "source", "fetched_at", "disclaimer"],
+  type: "object", required: ["schema_version", "verdict", "reasons", "intent_match", "brief_hash", "success", "summary", "sol_changes", "token_changes", "programs", "red_flags", "fee_estimate_lamports", "source", "fetched_at", "disclaimer"],
   properties: {
     success: { type: "boolean" }, error: { type: ["string", "null"] }, summary: { type: "string" },
     wallet: { type: "string" }, fee_payer: { type: "string" }, version: { type: ["string", "integer"] },
@@ -79,6 +89,7 @@ export const txPreviewOutputJsonSchema = {
     red_flags: { type: "array", items: flag },
     units_consumed: { type: ["integer", "null"] }, fee_estimate_lamports: { type: "string" }, fee_estimate_method: { type: "string" },
     logs: { type: "array", items: { type: "string" } }, slot: { type: ["integer", "null"] },
-    source: { type: "string" }, fetched_at: { type: "string", format: "date-time" }, disclaimer: { type: "string" }
+    source: { type: "string" }, fetched_at: { type: "string", format: "date-time" }, disclaimer: { type: "string" },
+    ...briefOutputJsonSchema
   }
 } as const;

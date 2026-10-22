@@ -1,11 +1,12 @@
 /** Pure analysis of a simulateTransaction result. No network; unit-testable. */
 import { base58 } from "@scure/base";
 import { accountKeys, type ParsedTx } from "./tx-preview-wire";
+import { VERIFIED_EQUITY_MINTS } from "./equities";
 export const SYSTEM = "11111111111111111111111111111111";
 export const TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 export const COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111";
-const WSOL = "So11111111111111111111111111111111111111112";
+export const WSOL = "So11111111111111111111111111111111111111112";
 export const KNOWN_PROGRAMS: Record<string, string> = {
   [SYSTEM]: "System", [TOKEN]: "SPL Token", [TOKEN_2022]: "Token-2022", [COMPUTE_BUDGET]: "Compute Budget",
   ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL: "Associated Token Account",
@@ -18,7 +19,8 @@ export const KNOWN_PROGRAMS: Record<string, string> = {
   LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo: "Meteora DLMM", Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB: "Meteora Pools",
   "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "Pump.fun", pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA: "PumpSwap AMM"
 };
-const MINT_LABELS: Record<string, string> = {
+export const MINT_LABELS: Record<string, string> = {
+  ...Object.fromEntries(VERIFIED_EQUITY_MINTS.map((e) => [e.mint, e.ticker])),
   [WSOL]: "wSOL", EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC", Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "USDT",
   DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: "BONK", JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: "JUP"
 };
@@ -102,9 +104,21 @@ export function describeError(err: unknown, programAt: (i: number) => string): s
   }
   return JSON.stringify(err).slice(0, 300);
 }
-export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string) {
+export interface AnalyzeOptions {
+  /** Extra owners whose token deltas are REPORTED (e.g. an intent's recipient). They never affect red-flag ownership rules. */
+  reportOwners?: string[];
+}
+/** Internal facts for the Pre-Sign Brief; stripped from the public response. */
+export interface PreviewFacts {
+  writable_accounts: string[];
+  lookups_resolved: boolean;
+  close_own_account: boolean;
+  compute_unit_limit: number | null;
+  balances_known: boolean;
+}
+export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string, opts: AnalyzeOptions = {}) {
   const loaded = sim.loadedAddresses ?? { writable: [], readonly: [] };
-  const { keys } = accountKeys(tx, loaded);
+  const { keys, writable: writableFlags } = accountKeys(tx, loaded);
   const me = wallet ?? tx.feePayer;
   const watched = new Set([me, tx.feePayer]);
   const flags: RedFlag[] = [];
@@ -139,11 +153,19 @@ export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string) {
   };
   add(sim.preTokenBalances, "before"); add(sim.postTokenBalances, "after");
   // Rent locked into NEW token accounts owned by the wallet (refundable when the account is closed).
+  // For a new wSOL account the lamports also hold the wrapped amount, so subtract it to get the rent alone.
   let newAccountRent = 0n, newAccounts = 0;
+  const wsolAfter = new Map<string, bigint>();
+  for (const t of sim.postTokenBalances ?? []) if (t.mint === WSOL && keys[t.accountIndex] && /^\d+$/.test(t.uiTokenAmount?.amount ?? "")) wsolAfter.set(keys[t.accountIndex], BigInt(t.uiTokenAmount.amount));
   if (balancesKnown) keys.forEach((k, i) => {
-    if (watched.has(ownerOf.get(k) ?? "") && !watched.has(k) && pre[i] === 0 && post[i] > 0) { newAccountRent += BigInt(post[i]); newAccounts++; }
+    if (watched.has(ownerOf.get(k) ?? "") && !watched.has(k) && pre[i] === 0 && post[i] > 0) {
+      const rent = BigInt(post[i]) - (wsolAfter.get(k) ?? 0n);
+      if (rent > 0n) newAccountRent += rent;
+      newAccounts++;
+    }
   });
-  const tokenChanges = [...agg.values()].filter((r) => watched.has(r.owner) && r.before !== r.after).map((r) => ({
+  const reportOwners = new Set([...watched, ...(opts.reportOwners ?? [])]);
+  const tokenChanges = [...agg.values()].filter((r) => reportOwners.has(r.owner) && r.before !== r.after).map((r) => ({
     owner: r.owner, mint: r.mint, symbol: MINT_LABELS[r.mint] ?? null, token_program: r.program === TOKEN_2022 ? "token-2022" : r.program === TOKEN ? "spl-token" : r.program,
     decimals: r.decimals, before: formatUnits(r.before, r.decimals), after: formatUnits(r.after, r.decimals), delta: formatUnits(r.after - r.before, r.decimals),
     delta_raw: (r.after - r.before).toString(), is_wallet: r.owner === me, token_accounts: [...r.accounts]
@@ -169,6 +191,7 @@ export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string) {
       }
     });
   }
+  let closeOwn = false;
   const mine = (acct: unknown) => typeof acct === "string" && (watched.has(acct) || watched.has(ownerOf.get(acct) ?? ""));
   for (const a of actions) {
     const info = a.info;
@@ -181,6 +204,7 @@ export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string) {
       flags.push({ id: owner ? "token_account_owner_change" : "authority_change", severity: "critical", instruction: a.where,
         message: `Changes the ${String(info.authorityType)} authority of ${String(info.account ?? info.mint)} to ${info.newAuthority ? String(info.newAuthority) : "none"}.` });
     }
+    if (a.type === "closeAccount" && mine(info.account)) closeOwn = true;
     if (a.type === "closeAccount" && mine(info.account) && !watched.has(String(info.destination))) {
       flags.push({ id: "close_account_to_other", severity: "critical", instruction: a.where,
         message: `Closes your token account ${String(info.account)} and sends its rent/SOL to someone else (${String(info.destination)}).` });
@@ -206,7 +230,15 @@ export function analyze(tx: ParsedTx, sim: SimValue, wallet?: string) {
   if (!balancesKnown && !error) flags.push({ id: "balances_unavailable", severity: "warning", message: "The RPC did not return balance changes; the preview is incomplete." });
   const feeFromRpc = typeof sim.fee === "number" && Number.isSafeInteger(sim.fee) && sim.fee >= 0;
   const fee = feeFromRpc ? BigInt(sim.fee as number) : estimateFee(tx);
+  const facts: PreviewFacts = {
+    writable_accounts: [...new Set(keys.filter((_, i) => writableFlags[i]))],
+    lookups_resolved: loaded.writable.length === tx.lookupWritableCount && loaded.readonly.length === tx.lookupReadonlyCount,
+    close_own_account: closeOwn,
+    compute_unit_limit: computeBudget(tx).limit,
+    balances_known: balancesKnown
+  };
   return {
+    facts,
     success: error === null, error, sim_error_raw: sim.err ?? null,
     summary: summarize(error, walletSol, me === tx.feePayer, fee, tokenChanges.filter((t) => t.is_wallet), flags, { rent: newAccountRent, count: newAccounts }),
     new_token_account_rent_lamports: newAccountRent.toString(),

@@ -17,7 +17,7 @@ Five small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x
 | `GET /api/crypto` | $0.003 (3000) | `pair` (optional): `SOL-USDC` (default), `RAY-USDC` or `all` |
 | `GET /api/weather` | $0.003 (3000) | **either** `city` **or** both `lat` and `lon` |
 | `GET /api/token-check` | $0.01 (10000) | `mint` (required): base58 SPL Token or Token-2022 mint address |
-| `POST /api/tx-preview` | $0.01 (10000) | JSON body: `transaction` (required, base64 or base58, unsigned or signed, legacy or v0, max 1232 bytes), `wallet` (optional), `encoding` (optional) |
+| `POST /api/tx-preview` | $0.01 (10000) | JSON body: `transaction` (required, base64 or base58, unsigned or signed, legacy or v0, max 1232 bytes), `wallet`, `encoding`, `intent`, `context` (all optional) |
 
 Free routes: `GET /health`, `GET /.well-known/x402.json` (discovery manifest with JSON schemas), `GET /openapi.json`, `GET /llms.txt`.
 
@@ -76,6 +76,39 @@ What happens: the server calls `simulateTransaction` (with `sigVerify: false`, `
 - `programs`: every program invoked (top-level and inner CPI), labelled when well known (System, SPL Token, Token-2022, ATA, Compute Budget, Memo, Jupiter v6, Raydium AMM v4/CLMM/CPMM, Orca Whirlpool, Meteora DLMM/Pools, Pump.fun, PumpSwap, ...).
 - `red_flags` (`critical` / `warning` / `info`): `simulation_failed`, `token_approval` (approve/approveChecked on your token account, including inside CPIs), `token_account_owner_change` / `authority_change` (setAuthority), `close_account_to_other` (closes your token account and sends the rent elsewhere), `wallet_owner_reassigned` (System assign of your wallet, a drainer pattern), `wallet_loses_over_90pct_sol`, `unknown_program` (top-level program not on the list), `extra_signers`, `wallet_not_signer`.
 - `fee_estimate_lamports` (from the RPC's own `fee` field; if missing, 5000 per signature plus compute-unit price × requested CU limit), `units_consumed`, `compute_unit_limit`, `compute_unit_price_micro_lamports`, `lookup_tables`, the first 50 `logs`, `slot`, `source`, `fetched_at`, `disclaimer`.
+
+#### Pre-Sign Brief (optional, schema 1.0, same price)
+Add an `intent` and/or `context` to the same request and every response gains these extra fields (all existing fields stay as they were):
+```bash
+curl -X POST .../api/tx-preview -H 'Content-Type: application/json' -d '{
+  "transaction": "<base64 tx>", "wallet": "<you>",
+  "intent": "swap 0.002 SOL for NVDAx",
+  "context": { "type": "tokenized_equity", "ticker": "NVDAx" } }'
+```
+- `verdict`: `clear`, `caution` or `avoid`, with `reasons` (upper-case codes).
+  - `avoid`: the simulation failed, or there is any `critical` red flag (for example a token approval, an owner change, a close that sends rent to someone else, a wallet reassign, losing over 90% of your SOL, or `tokenized_equity_counterfeit`).
+  - `caution`: any `warning` red flag (for example `unknown_program` or `intent_identity_unverified`), or an intent that does not match what the transaction does.
+  - `clear`: it succeeds, there are no critical or warning flags, and any intent matched with high confidence. `info` flags (`extra_signers`, `wallet_not_signer`) do not change the verdict.
+  - **`clear` does not authorise signing.** It only means these rules found nothing.
+- `unknown_program` is only raised for **top-level** programs outside the known list (Jupiter v6, Raydium, Orca, Meteora, Pump.fun and others). A normal Jupiter swap that routes through other exchanges inside Jupiter's call is therefore `clear`.
+- `intent_match` has `checked`, `matches`, `mismatches` and `confidence`. Supported wording (anything else is `checked:false` with no penalty):
+  - `send|transfer <amount> <SOL|symbol|mint> to <address>`: must match **exactly**, for both your outflow and the recipient's inflow.
+  - `swap|sell <amount> <asset> for <asset>`: the input must be within 1%, and some output must arrive.
+  - `buy <amount> <asset> for <asset>`: always flagged `BUY_SPEND_UNBOUNDED`, because the spend is not stated.
+  - `approve …` and `close …`: always low confidence, so never `clear`.
+  - How amounts are counted: SOL means native SOL plus wrapped SOL (wSOL). The network fee is added back when your wallet pays it, and refundable rent for new token accounts is added back too, so Jupiter wrap/unwrap and ATA creation don't count as spending.
+  - Symbols are matched only through our own address-based list (SOL, USDC, USDT, BONK, JUP, xStocks), never through token metadata. Other tokens need their mint address.
+  - Mismatch codes: `AMOUNT_MISMATCH`, `RECIPIENT_NOT_PAID`, `RECIPIENT_AMOUNT_MISMATCH`, `NO_OUTPUT_RECEIVED`, `EXTRA_TOKEN_OUTFLOW`, `EXTRA_SOL_OUTFLOW`, `TOKEN_NOT_FOUND`, …
+- `tokenized_equity`: `checked_mints`, `claimed_mint`, `counterfeit_risk` and `reason`. The allowlist holds 6 verified xStocks mints (Backed Finance). Each is listed on <https://solana.com/news/case-study-xstocks>, is a Token-2022 mint on-chain whose metadata has the matching symbol and the issuer's update authority, and has issuer metadata at `xstocks-metadata.backed.fi/tokens/Solana/<TICKER>/metadata.json`:
+  NVDAx `Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh`, TSLAx `XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB`, AAPLx `XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp`, SPYx `XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W`, MSFTx `XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX`, AMZNx `Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg`.
+  - `counterfeit_risk` is set only when you **claim** a stock (`context.type: "tokenized_equity"`, or a stock-like ticker such as `NVDAx`) and the token is not one of these mints, or its ticker doesn't match. It means "not verified", not proven fraud.
+  - The issuers' own controls on these mints (permanent delegate, pausable, frozen-by-default accounts, transfer hook) are expected and are not counted against them.
+- `priority_fee`: a summary of `getRecentPrioritizationFees` for the transaction's writable accounts, as worked out by the server (including accounts loaded from lookup tables).
+  - Values are in **micro-lamports per compute unit**, as the official RPC docs define. You get the p75 (`recommended_micro_lamports`), the median, the sample counts, your transaction's own CU price and limit, and the cost in lamports at p75 for your CU limit.
+  - It is `null` if the lookup fails or the lookup tables could not be resolved. That never changes the HTTP status or your charge, and it is a market hint, not a guarantee the transaction lands.
+- `brief_hash`: `sha256:` over canonical JSON (sorted keys) of `success`, `sol_changes`, `token_changes`, `programs`, `red_flags` and `verdict`. It is a fingerprint for your records, not a signed attestation.
+- A bad `intent` (empty or over 200 characters) or a bad `context` (unknown type, bad ticker or mint, extra keys) gets a free `400` before payment. The transaction is simulated exactly once.
+- For a `send` intent, the recipient's token changes are also listed in `token_changes` with `is_wallet: false`.
 
 Free `400`s (no payment): non-JSON or non-`application/json` body (`415`), unknown fields, bad base64/base58, a structurally invalid transaction (signature count not matching the header, unsupported version, trailing bytes, bad indexes), or a body over 8 KB (`413`). The transaction is only parsed before payment; it is not simulated until you pay.
 A simulation that reports a transaction failure is still a paid `200` (the preview worked and told you it would fail). If every RPC is down you get `502`/`504` and are not charged.
@@ -167,6 +200,7 @@ asyncio.run(main())
 - **Verified mainnet paid call:** `GET /api/token-check?mint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` paid $0.01 USDC and returned HTTP 200 with `concentration_status: "ok"`, on 2026-10-22. Settlement tx: [`24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL`](https://solscan.io/tx/24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL). This was a self-test from the operator's own wallet.
 - **Verified mainnet paid call:** `GET /api/weather?city=London` paid $0.003 USDC and returned HTTP 200 with six MET Norway forecast points on 2026-10-22. Settlement tx: [`5g2QjHXDsAu7T3zhDzwfny1MryBwDfFC2Rxp14RJsuQf9PV8Do3qk49DcpyyD3erELvMrkLwdUaQ2jjFFwwR6Ycy`](https://solscan.io/tx/5g2QjHXDsAu7T3zhDzwfny1MryBwDfFC2Rxp14RJsuQf9PV8Do3qk49DcpyyD3erELvMrkLwdUaQ2jjFFwwR6Ycy). Self-test. All four paid routes have now settled at least one mainnet payment.
 - **Verified mainnet paid call:** `POST /api/tx-preview` with a genuine unsigned SOL transfer (never signed or sent) paid $0.01 USDC and returned HTTP 200 with the correct preview (`You send 0.001 SOL. Fee ~0.000005 SOL. No red flags.`), on 2026-10-22. Settlement tx: [`3z11L6EKjv1L2gDTdvQ6uJecn6CpnzNTksm8Pp2tosDGYLujZirKAJgsjJByKcoXpxQdoaCedSJiU1wWZWT2twXT`](https://solscan.io/tx/3z11L6EKjv1L2gDTdvQ6uJecn6CpnzNTksm8Pp2tosDGYLujZirKAJgsjJByKcoXpxQdoaCedSJiU1wWZWT2twXT). Self-test. An unsigned Jupiter v0 swap (SOL → BONK via Raydium, GoonFi and Whirlpool, 3 lookup tables, 39 accounts) was also previewed against mainnet with correct balance, rent and fee figures; the test suite includes a real Jupiter v0 fixture.
+- **Verified mainnet paid call (Pre-Sign Brief):** `POST /api/tx-preview` with an unsigned SOL transfer (never signed or sent) and `intent: "send 0.001 SOL to 5bmk…"` paid $0.01 USDC and returned HTTP 200 with `verdict: "clear"` and `intent_match.matches: true` (high confidence), on 2026-10-22. Settlement tx: [`2dkaGLBxGeYu8Ps1s6YgScHdxLfGv5vNS73KEvoviasM3V1FZFXESLpHnkML1UfjpedU72LnCJbaKeNcksCwD3Gw`](https://solscan.io/tx/2dkaGLBxGeYu8Ps1s6YgScHdxLfGv5vNS73KEvoviasM3V1FZFXESLpHnkML1UfjpedU72LnCJbaKeNcksCwD3Gw). Self-test. Unpaid live checks: wrong recipient gives `caution` (`INTENT_RECIPIENT_NOT_PAID`); Jupiter SOL→USDC with `swap 0.002 SOL for USDC` gives `clear`; Jupiter SOL→NVDAx with `context.ticker: "NVDAx"` gives `clear` (known xStocks mint); the same transaction claimed as `AAPLx` gives `avoid`.
 - Solana RPC: the server tries an optional keyed provider first (Cloudflare secret `PRIMARY_RPC_URL`, never committed), then the public endpoints in `SOLANA_RPC_URL` (a comma-separated list in `wrangler.jsonc`). `api.mainnet-beta.solana.com` blocks Cloudflare Workers, so it is only the last fallback.
 - **Verified mainnet paid call:** `GET /api/crypto?pair=all` paid $0.003 USDC and returned HTTP 200 on 2026-10-22 (SOL-USDC 103.37, RAY-USDC 1.8446). Settlement tx: [`5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7`](https://solscan.io/tx/5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7). Self-test.
 - Rate limits: 30 requests/min per client per route at the edge.
