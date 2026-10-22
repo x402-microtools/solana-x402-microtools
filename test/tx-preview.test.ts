@@ -176,6 +176,8 @@ test("app: GET -> 405, bad POST body -> free 400 (no 402 challenge)", async () =
   assert.equal(g.status, 405); assert.equal(g.headers.get("Allow"), "POST");
   const p = await app.request("/api/tx-preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: body({ transaction: "AAAA" }) }, env);
   assert.equal(p.status, 400); assert.equal(p.headers.get("PAYMENT-REQUIRED"), null);
+  const ct = await app.request("/api/tx-preview", { method: "POST", body: body({ transaction: "AAAA" }) }, env);
+  assert.equal(ct.status, 415);
   const other = await app.request("/api/weather?city=london", { method: "POST" }, env);
   assert.equal(other.status, 405);
 });

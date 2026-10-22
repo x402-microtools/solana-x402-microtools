@@ -92,8 +92,11 @@ app.use("/api/token-check", async (c, next) => {
 });
 // Free pre-payment check: body read ONCE here (Hono caches it, so x402 and the handler can re-read); malformed JSON,
 // bad encodings and structurally invalid transactions get a 400 without a payment challenge. No network calls.
+// An EMPTY body is treated as a discovery probe (x402scan/402index): it gets the 402 challenge so the route can be
+// listed. It can never be charged: the handler then returns 400, and the x402 middleware cancels settlement on >= 400.
 app.use("/api/tx-preview", async (c, next) => {
-  c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), await c.req.text()));
+  const raw = await c.req.text();
+  if (raw.trim().length > 0) c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), raw));
   await next();
 });
 async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
