@@ -1,0 +1,37 @@
+{
+  "name": "solana-x402-microtools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --env devnet",
+    "deploy:devnet": "wrangler deploy --env devnet",
+    "deploy:mainnet": "wrangler deploy --env mainnet",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:paid": "tsx scripts/paid-devnet.ts",
+    "test:unpaid": "tsx scripts/unpaid.ts"
+  },
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/extensions": "2.28.0",
+    "@x402/fetch": "2.28.0",
+    "@x402/hono": "2.28.0",
+    "@x402/svm": "2.28.0",
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261022.1",
+    "@scure/base": "^2.0.0",
+    "@solana-program/token": "^0.9.0",
+    "@solana/kit": "^5.5.1",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "viem": "^2.57.10",
+    "wrangler": "^4.45.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "solana-x402-microtools",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "env": {
+    "devnet": {
+      "name": "solana-x402-microtools-devnet",
+      "ratelimits": [
+        { "name": "INBOUND_LIMIT", "namespace_id": "61001", "simple": { "limit": 30, "period": 60 } },
+        { "name": "UPSTREAM_LIMIT", "namespace_id": "61002", "simple": { "limit": 60, "period": 60 } }
+      ],
+      "vars": {
+        "NETWORK": "devnet",
+        "FACILITATOR_URL": "https://facilitator.payai.network",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
+      }
+    },
+    "mainnet": {
+      "name": "solana-x402-microtools-mainnet",
+      "ratelimits": [
+        { "name": "INBOUND_LIMIT", "namespace_id": "61003", "simple": { "limit": 30, "period": 60 } },
+        { "name": "UPSTREAM_LIMIT", "namespace_id": "61004", "simple": { "limit": 60, "period": 60 } }
+      ],
+      "vars": {
+        "NETWORK": "mainnet",
+        "FACILITATOR_URL": "https://facilitator.payai.network",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
+      }
+    }
+  }
+}

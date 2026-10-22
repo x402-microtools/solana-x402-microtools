@@ -1,0 +1,16 @@
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+keys/
+*.key
+*.pem
+*keypair*.json
+payer.json
+buyer*.json
+seller*.json
