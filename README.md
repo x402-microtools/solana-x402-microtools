@@ -143,8 +143,9 @@ asyncio.run(main())
 ## Status
 - **Verified mainnet paid call:** `GET /api/preflight?url=https://x402.org` paid $0.01 USDC and returned HTTP 200 with a `PAYMENT-RESPONSE` header, on 2026-10-22. Settlement tx: [`5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL`](https://solscan.io/tx/5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL). This was a self-test from the operator's own wallet.
 - **Verified mainnet paid call:** `GET /api/token-check?mint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` paid $0.01 USDC and returned HTTP 200 with `concentration_status: "ok"`, on 2026-10-22. Settlement tx: [`24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL`](https://solscan.io/tx/24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL). This was a self-test from the operator's own wallet.
-- `/api/crypto` and `/api/weather` return correct 402 challenges on mainnet. Their handlers were tested locally against live data, but neither has had a paid mainnet call yet.
-- Solana RPC: the server tries several public endpoints in order (`SOLANA_RPC_URL` is a comma-separated list), because `api.mainnet-beta.solana.com` blocks Cloudflare Workers.
+- `/api/weather` returns a correct 402 challenge on mainnet. Its handler was tested locally against live data, but it has not had a paid mainnet call yet.
+- Solana RPC: the server tries an optional keyed provider first (Cloudflare secret `PRIMARY_RPC_URL`, never committed), then the public endpoints in `SOLANA_RPC_URL` (a comma-separated list in `wrangler.jsonc`). `api.mainnet-beta.solana.com` blocks Cloudflare Workers, so it is only the last fallback.
+- **Verified mainnet paid call:** `GET /api/crypto?pair=all` paid $0.003 USDC and returned HTTP 200 on 2026-10-22 (SOL-USDC 103.37, RAY-USDC 1.8446). Settlement tx: [`5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7`](https://solscan.io/tx/5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7). Self-test.
 - Rate limits: 30 requests/min per client per route at the edge.
 
 ## Running your own copy
@@ -156,7 +157,7 @@ npm run typecheck && npm test
 npx wrangler dev --env devnet
 API_URL=http://localhost:8787 npm run test:unpaid
 # deploy
-npx wrangler secret put PAY_TO_ADDRESS --env mainnet   # also MET_CONTACT, RATE_LIMIT_SALT
+npx wrangler secret put PAY_TO_ADDRESS --env mainnet   # also MET_CONTACT, RATE_LIMIT_SALT, optional PRIMARY_RPC_URL
 npm run deploy:mainnet
 ```
 The receiving wallet needs a USDC associated token account before its first payment (`scripts/create-ata.ts`).

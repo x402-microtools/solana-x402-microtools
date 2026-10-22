@@ -19,18 +19,24 @@ interface Env {
   RATE_LIMIT_SALT: string;
   MET_CONTACT: string;
   SOLANA_RPC_URL: string;
+  /** Optional secret (e.g. keyed provider URL). Tried before the public SOLANA_RPC_URL list. Never put it in wrangler.jsonc. */
+  PRIMARY_RPC_URL?: string;
   INBOUND_LIMIT: Limiter;
   UPSTREAM_LIMIT: Limiter;
 }
 type HonoEnv = { Bindings: Env; Variables: { mintSnapshot?: MintSnapshot } };
 const app = new Hono<HonoEnv>();
+/** Secret primary RPC first, then the public fallback list from wrangler.jsonc. */
+function rpcUrls(e: Env): string {
+  return [e.PRIMARY_RPC_URL, e.SOLANA_RPC_URL].map((x) => (x ?? "").trim()).filter(Boolean).join(",");
+}
 function config(e: Env): { network: `${string}:${string}`; payTo: string; facilitator: string } {
   if (e.NETWORK !== "mainnet" && e.NETWORK !== "devnet") throw new Error("NETWORK must be devnet or mainnet");
   if (!e.PAY_TO_ADDRESS || !BASE58.test(e.PAY_TO_ADDRESS)) throw new Error("Invalid PAY_TO_ADDRESS");
   if (!e.RATE_LIMIT_SALT || e.RATE_LIMIT_SALT.length < 32) throw new Error("Missing RATE_LIMIT_SALT (at least 32 characters)");
   if (!e.MET_CONTACT || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.MET_CONTACT)) throw new Error("MET_CONTACT must be a working contact email");
   if (!e.FACILITATOR_URL || !e.FACILITATOR_URL.startsWith("https://")) throw new Error("FACILITATOR_URL must be HTTPS");
-  if (!e.SOLANA_RPC_URL || e.SOLANA_RPC_URL.split(",").some((u) => !u.trim().startsWith("https://"))) throw new Error("SOLANA_RPC_URL must be HTTPS (comma-separated list allowed)");
+  if (rpcUrls(e).split(",").some((u) => !u.trim().startsWith("https://"))) throw new Error("SOLANA_RPC_URL / PRIMARY_RPC_URL must be HTTPS (comma-separated list allowed)");
   return { network: e.NETWORK === "devnet" ? DEVNET : MAINNET, payTo: e.PAY_TO_ADDRESS, facilitator: e.FACILITATOR_URL };
 }
 app.use("*", async (c, next) => {
@@ -75,7 +81,7 @@ app.use("/api/weather", async (c, next) => { parseWeather(new URL(c.req.url).sea
 // Free pre-payment check: malformed, missing or non-mint addresses get a 400 without a payment challenge (after the inbound rate limit).
 app.use("/api/token-check", async (c, next) => {
   const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
-  c.set("mintSnapshot", await readMintSnapshot(c.env.SOLANA_RPC_URL, mint));
+  c.set("mintSnapshot", await readMintSnapshot(rpcUrls(c.env), mint));
   await next();
 });
 async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
@@ -160,7 +166,7 @@ function token(account: ParsedTokenAccount | null | undefined, mint: string): nu
 const rpcCached = new Map<string, { until: number; payload: ReturnType<typeof mapPools> }>();
 async function solanaPools(rpcUrl: string, pair: Pair) {
   const now = Date.now();
-  const cacheKey = `${rpcUrl}|${pair}`;
+  const cacheKey = pair;
   const hit = rpcCached.get(cacheKey);
   if (hit && hit.until > now) return hit.payload;
   const pools = Object.entries(POOLS).filter(([key]) => pair === "all" || key === pair);
@@ -197,7 +203,7 @@ function mapPools(slot: number, values: Array<ParsedTokenAccount | null>, pools:
 app.get("/api/crypto", async (c) => {
   const { pair } = parseCrypto(new URL(c.req.url).searchParams);
   await consumeUpstream(c, "crypto");
-  const chosen = await solanaPools(c.env.SOLANA_RPC_URL, pair);
+  const chosen = await solanaPools(rpcUrls(c.env), pair);
   return c.json({ source: "solana_mainnet_onchain_rpc", method: "raydium_amm_v4_vault_reserve_ratio_only", trending: false,
     disclaimer: "AMM vault balances can be stale or manipulated; not a trading quote, pool ranking or financial advice.",
     pairs: chosen, checked_at: new Date().toISOString() });
@@ -237,8 +243,8 @@ app.get("/api/weather", async (c) => {
 app.get("/api/token-check", async (c) => {
   const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
   await consumeUpstream(c, "token-check");
-  const snapshot = c.get("mintSnapshot") ?? await readMintSnapshot(c.env.SOLANA_RPC_URL, mint);
-  return c.json(await analyzeToken(c.env.SOLANA_RPC_URL, snapshot));
+  const snapshot = c.get("mintSnapshot") ?? await readMintSnapshot(rpcUrls(c.env), mint);
+  return c.json(await analyzeToken(rpcUrls(c.env), snapshot));
 });
 app.onError((e, c) => {
   if (e instanceof InputError) return c.json({ error: e.message }, 400);

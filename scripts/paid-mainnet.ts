@@ -20,7 +20,7 @@ const signer = await createKeyPairSignerFromBytes(secret);
 const client = new x402Client();
 client.registerPolicy((_version, offers) => offers.filter((x) =>
   x.network === MAINNET && x.asset === MAINNET_USDC && x.scheme === "exact" &&
-  x.payTo === recipient && BigInt(x.amount) === 10_000n
+  x.payTo === recipient && BigInt(x.amount) === BigInt(process.env.EXPECTED_AMOUNT ?? "10000")
 ));
 client.register("solana:*", new ExactSvmScheme(signer));
 const fetchPaid = wrapFetchWithPayment(fetch, client);
@@ -28,7 +28,7 @@ const initial = await fetch(endpoint);
 if (initial.status !== 402 || !initial.headers.has("PAYMENT-REQUIRED")) {
   throw Error(`Expected unpaid x402 v2 challenge; received ${initial.status}`);
 }
-console.log("Received 402 challenge; now attempting ONE MAINNET USDC payment ($0.01).");
+console.log(`Received 402 challenge; now attempting ONE MAINNET USDC payment of ${process.env.EXPECTED_AMOUNT ?? "10000"} atomic units.`);
 const paid = await fetchPaid(endpoint.toString());
 const payload = await paid.text();
 console.log("HTTP status:", paid.status);
