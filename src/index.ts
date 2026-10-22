@@ -68,6 +68,8 @@ app.get("/.well-known/x402.json", (c) => {
   const cfg = config(c.env);
   return c.json(manifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
 });
+// 402index.io domain-ownership proof: SHA-256 hash of the claim token (the hash is public by design; the token is not).
+app.get("/.well-known/402index-verify.txt", (c) => c.text("a1755b244546bcb0ae550452fd7e9bf3a5f1ea29215b65d5a8dbeed41486b5ab"));
 app.get("/openapi.json", (c) => c.json(openapi(new URL(c.req.url).origin)));
 app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nPOST /api/tx-preview JSON {\"transaction\":\"<base64|base58 unsigned or signed tx>\",\"wallet\":\"<optional address>\"} ($0.01 USDC): simulate a Solana tx before signing; balance changes, programs, fee, red flags\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
 app.use("/api/*", async (c, next) => {
