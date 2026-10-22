@@ -147,6 +147,9 @@ const res = await fetchPaid(`${API}/api/weather?city=london`);
 console.log(res.status, await res.text());
 ```
 
+### Solana Agent Kit v2 plugin
+[`solana-agent-kit-plugin-tx-preview`](https://github.com/x402-microtools/solana-agent-kit-plugin-tx-preview) is a free, MIT-licensed, opt-in plugin that wraps `POST /api/tx-preview` as the method `previewTransaction` and the action `PREVIEW_TRANSACTION_BEFORE_SIGNING`. You supply the x402-paying `fetch`. The plugin never signs, sends or blocks.
+
 ### Python (`x402[httpx,svm]`)
 ```bash
 pip install "x402[httpx,svm]"   # tested with x402 2.25.0
