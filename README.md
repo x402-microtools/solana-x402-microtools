@@ -1,13 +1,13 @@
 # Solana x402 Microtools
 
-Four small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
+Five small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
 
 - **Base URL:** `https://solana-x402-microtools-mainnet.valecity.workers.dev`
 - **Network:** `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (Solana mainnet)
 - **Asset:** USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
 - **payTo:** `Aqgp4nKbk3WV1e7fLHepkcdwLLz3j8DwHqLTLHVEa6GK`
 - **Scheme:** `exact`, settled through the PayAI facilitator (`https://facilitator.payai.network`), which pays the Solana network fee
-- **Methods:** only `GET`. `HEAD` and other methods return `405`.
+- **Methods:** `GET`, except `POST /api/tx-preview` (JSON body). `HEAD` and other methods return `405`.
 
 ## Endpoints
 
@@ -17,6 +17,7 @@ Four small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x
 | `GET /api/crypto` | $0.003 (3000) | `pair` (optional): `SOL-USDC` (default), `RAY-USDC` or `all` |
 | `GET /api/weather` | $0.003 (3000) | **either** `city` **or** both `lat` and `lon` |
 | `GET /api/token-check` | $0.01 (10000) | `mint` (required): base58 SPL Token or Token-2022 mint address |
+| `POST /api/tx-preview` | $0.01 (10000) | JSON body: `transaction` (required, base64 or base58, unsigned or signed, legacy or v0, max 1232 bytes), `wallet` (optional), `encoding` (optional) |
 
 Free routes: `GET /health`, `GET /.well-known/x402.json` (discovery manifest with JSON schemas), `GET /openapi.json`, `GET /llms.txt`.
 
@@ -59,6 +60,27 @@ Reads the mint account from Solana mainnet and returns:
   - transfer fee +1, permanent delegate +3, transfer hook +2, pausable +2, non-transferable +3.
 
 This is a heuristic, not an audit. Regulated stablecoins such as USDC score `high` because their issuer keeps mint and freeze control, so read the flags rather than the label alone. Liquidity, metadata, holder identities and hook-program behaviour are not checked.
+
+### `POST /api/tx-preview`
+Simulate a Solana transaction **before you sign it** and see what it would actually do. Send the serialized transaction (all-zero signature slots are fine, so an unsigned transaction from Jupiter or any SDK works as-is):
+```bash
+curl -X POST https://solana-x402-microtools-mainnet.valecity.workers.dev/api/tx-preview \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":"<base64 tx>","wallet":"<your address, optional>"}'
+# -> 402 with a PAYMENT-REQUIRED challenge; an x402 client pays $0.01 and retries with the same body
+```
+What happens: the server calls `simulateTransaction` (with `sigVerify: false`, `replaceRecentBlockhash: true`, `innerInstructions: true`) on mainnet. The RPC resolves address lookup tables and returns pre/post balances, so v0 transactions are covered. You get:
+- `success`, `error` (decoded, e.g. `Instruction 0 (System) failed: custom program error 0x1`) and a plain-English `summary`, e.g. `Would succeed. You send 0.00348844 SOL (incl. 0.00148844 SOL refundable rent for 1 new token account). You receive 68321.99715 BONK. Fee ~0.000005431 SOL. No red flags.`
+- `sol_changes`: lamport before/after/delta for your wallet and fee payer, plus any other account whose balance changes.
+- `token_changes`: per-mint SPL / Token-2022 before/after/delta for token accounts **owned by your wallet** (or the fee payer), including accounts created or closed by the transaction. A few well-known mints get a symbol (USDC, USDT, wSOL, BONK, JUP); others show the mint address only.
+- `programs`: every program invoked (top-level and inner CPI), labelled when well known (System, SPL Token, Token-2022, ATA, Compute Budget, Memo, Jupiter v6, Raydium AMM v4/CLMM/CPMM, Orca Whirlpool, Meteora DLMM/Pools, Pump.fun, PumpSwap, ...).
+- `red_flags` (`critical` / `warning` / `info`): `simulation_failed`, `token_approval` (approve/approveChecked on your token account, including inside CPIs), `token_account_owner_change` / `authority_change` (setAuthority), `close_account_to_other` (closes your token account and sends the rent elsewhere), `wallet_owner_reassigned` (System assign of your wallet, a drainer pattern), `wallet_loses_over_90pct_sol`, `unknown_program` (top-level program not on the list), `extra_signers`, `wallet_not_signer`.
+- `fee_estimate_lamports` (from the RPC's own `fee` field; if missing, 5000 per signature plus compute-unit price × requested CU limit), `units_consumed`, `compute_unit_limit`, `compute_unit_price_micro_lamports`, `lookup_tables`, the first 50 `logs`, `slot`, `source`, `fetched_at`, `disclaimer`.
+
+Free `400`s (no payment): non-JSON or non-`application/json` body (`415`), unknown fields, bad base64/base58, a structurally invalid transaction (signature count not matching the header, unsupported version, trailing bytes, bad indexes), or a body over 8 KB (`413`). The transaction is only parsed before payment; it is not simulated until you pay.
+A simulation that reports a transaction failure is still a paid `200` (the preview worked and told you it would fail). If every RPC is down you get `502`/`504` and are not charged.
+
+Limits: this is a point-in-time simulation. State can change before you sign, swap amounts can differ, and an unknown program can do things the red-flag rules do not recognise. Token changes only cover accounts owned by your wallet or fee payer. Never use it as the only check before autonomous signing. Not financial advice.
 
 ## Client examples
 
@@ -144,6 +166,7 @@ asyncio.run(main())
 - **Verified mainnet paid call:** `GET /api/preflight?url=https://x402.org` paid $0.01 USDC and returned HTTP 200 with a `PAYMENT-RESPONSE` header, on 2026-10-22. Settlement tx: [`5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL`](https://solscan.io/tx/5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL). This was a self-test from the operator's own wallet.
 - **Verified mainnet paid call:** `GET /api/token-check?mint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` paid $0.01 USDC and returned HTTP 200 with `concentration_status: "ok"`, on 2026-10-22. Settlement tx: [`24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL`](https://solscan.io/tx/24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL). This was a self-test from the operator's own wallet.
 - **Verified mainnet paid call:** `GET /api/weather?city=London` paid $0.003 USDC and returned HTTP 200 with six MET Norway forecast points on 2026-10-22. Settlement tx: [`5g2QjHXDsAu7T3zhDzwfny1MryBwDfFC2Rxp14RJsuQf9PV8Do3qk49DcpyyD3erELvMrkLwdUaQ2jjFFwwR6Ycy`](https://solscan.io/tx/5g2QjHXDsAu7T3zhDzwfny1MryBwDfFC2Rxp14RJsuQf9PV8Do3qk49DcpyyD3erELvMrkLwdUaQ2jjFFwwR6Ycy). Self-test. All four paid routes have now settled at least one mainnet payment.
+- **Verified mainnet paid call:** `POST /api/tx-preview` with a genuine unsigned SOL transfer (never signed or sent) paid $0.01 USDC and returned HTTP 200 with the correct preview (`You send 0.001 SOL. Fee ~0.000005 SOL. No red flags.`), on 2026-10-22. Settlement tx: [`3z11L6EKjv1L2gDTdvQ6uJecn6CpnzNTksm8Pp2tosDGYLujZirKAJgsjJByKcoXpxQdoaCedSJiU1wWZWT2twXT`](https://solscan.io/tx/3z11L6EKjv1L2gDTdvQ6uJecn6CpnzNTksm8Pp2tosDGYLujZirKAJgsjJByKcoXpxQdoaCedSJiU1wWZWT2twXT). Self-test. An unsigned Jupiter v0 swap (SOL → BONK via Raydium, GoonFi and Whirlpool, 3 lookup tables, 39 accounts) was also previewed against mainnet with correct balance, rent and fee figures; the test suite includes a real Jupiter v0 fixture.
 - Solana RPC: the server tries an optional keyed provider first (Cloudflare secret `PRIMARY_RPC_URL`, never committed), then the public endpoints in `SOLANA_RPC_URL` (a comma-separated list in `wrangler.jsonc`). `api.mainnet-beta.solana.com` blocks Cloudflare Workers, so it is only the last fallback.
 - **Verified mainnet paid call:** `GET /api/crypto?pair=all` paid $0.003 USDC and returned HTTP 200 on 2026-10-22 (SOL-USDC 103.37, RAY-USDC 1.8446). Settlement tx: [`5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7`](https://solscan.io/tx/5KghBgoNsPR5ss1BxH1CUajYfpbm7khS5U8k1f56VTrSC9okbx88UdxiVcyVgwR4Qed8iZ49RepNW9NZTeG7WCc7). Self-test.
 - Rate limits: 30 requests/min per client per route at the edge.

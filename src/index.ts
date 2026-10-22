@@ -6,6 +6,8 @@ import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/
 import { InputError, parseCrypto, parsePreflight, parseWeather, type Pair } from "./inputs";
 import { TOOLS, manifest, openapi } from "./schemas";
 import { TokenCheckError, analyzeToken, parseTokenCheckQuery, readMintSnapshot, type MintSnapshot } from "./token-check";
+import { RpcError } from "./rpc";
+import { TxPreviewError, parseTxPreviewBody, previewTransaction, type TxPreviewInput } from "./tx-preview";
 const DEVNET = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" as const;
 const MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" as const;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -24,7 +26,7 @@ interface Env {
   INBOUND_LIMIT: Limiter;
   UPSTREAM_LIMIT: Limiter;
 }
-type HonoEnv = { Bindings: Env; Variables: { mintSnapshot?: MintSnapshot } };
+type HonoEnv = { Bindings: Env; Variables: { mintSnapshot?: MintSnapshot; txPreview?: TxPreviewInput } };
 const app = new Hono<HonoEnv>();
 /** Secret primary RPC first, then the public fallback list from wrangler.jsonc. */
 function rpcUrls(e: Env): string {
@@ -46,9 +48,13 @@ app.use("*", async (c, next) => {
   c.header("Referrer-Policy", "no-referrer");
 });
 app.use("*", async (c, next) => c.req.method === "HEAD" ? c.json({ error: "HEAD is disabled" }, 405) : next());
+/** Methods: POST only for the JSON-body routes (tx-preview), GET for everything else. */
+const POST_ROUTES = new Set<string>(TOOLS.filter((t) => t.method === "POST").map((t) => t.route));
 app.use("*", async (c, next) => {
-  if (["GET"].includes(c.req.method)) return next();
-  return c.json({ error: "Only GET is supported" }, 405);
+  const post = POST_ROUTES.has(new URL(c.req.url).pathname);
+  if (c.req.method === (post ? "POST" : "GET")) return next();
+  c.header("Allow", post ? "POST" : "GET");
+  return c.json({ error: post ? "Only POST with a JSON body is supported on this route" : "Only GET is supported" }, 405);
 });
 app.get("/health", (c) => {
   try {
@@ -63,7 +69,7 @@ app.get("/.well-known/x402.json", (c) => {
   return c.json(manifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
 });
 app.get("/openapi.json", (c) => c.json(openapi(new URL(c.req.url).origin)));
-app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
+app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nPOST /api/tx-preview JSON {\"transaction\":\"<base64|base58 unsigned or signed tx>\",\"wallet\":\"<optional address>\"} ($0.01 USDC): simulate a Solana tx before signing; balance changes, programs, fee, red flags\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
 app.use("/api/*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
   if (!TOOLS.some((x) => x.route === path)) return c.json({ error: "Unknown API route" }, 404);
@@ -84,6 +90,12 @@ app.use("/api/token-check", async (c, next) => {
   c.set("mintSnapshot", await readMintSnapshot(rpcUrls(c.env), mint));
   await next();
 });
+// Free pre-payment check: body read ONCE here (Hono caches it, so x402 and the handler can re-read); malformed JSON,
+// bad encodings and structurally invalid transactions get a 400 without a payment challenge. No network calls.
+app.use("/api/tx-preview", async (c, next) => {
+  c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), await c.req.text()));
+  await next();
+});
 async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
   const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
   const encoded = new TextEncoder().encode(`${salt}|${ip}|${route}`);
@@ -97,15 +109,13 @@ app.use("/api/*", async (c, next) => {
     .registerExtension(bazaarResourceServerExtension);
   const routes: Record<string, unknown> = {};
   for (const tool of TOOLS) {
-    routes[`GET ${tool.route}`] = {
+    routes[`${tool.method} ${tool.route}`] = {
       accepts: [{ scheme: "exact", price: tool.price, network: cfg.network, payTo: cfg.payTo }],
       description: tool.summary,
       mimeType: "application/json",
-      extensions: declareDiscoveryExtension({
-        input: tool.example,
-        inputSchema: tool.input,
-        output: { example: tool.outputExample, schema: tool.output }
-      })
+      extensions: declareDiscoveryExtension(tool.method === "POST"
+        ? { input: tool.example, inputSchema: tool.input, bodyType: "json", output: { example: tool.outputExample, schema: tool.output } }
+        : { input: tool.example, inputSchema: tool.input, output: { example: tool.outputExample, schema: tool.output } })
     };
   }
   return paymentMiddleware(routes as unknown as Parameters<typeof paymentMiddleware>[0], server)(c, next);
@@ -246,7 +256,16 @@ app.get("/api/token-check", async (c) => {
   const snapshot = c.get("mintSnapshot") ?? await readMintSnapshot(rpcUrls(c.env), mint);
   return c.json(await analyzeToken(rpcUrls(c.env), snapshot));
 });
+app.post("/api/tx-preview", async (c) => {
+  const input = c.get("txPreview") ?? parseTxPreviewBody(c.req.header("Content-Type"), await c.req.text());
+  await consumeUpstream(c, "tx-preview");
+  return c.json(await previewTransaction(rpcUrls(c.env), input));
+});
 app.onError((e, c) => {
+  if (e instanceof TxPreviewError || e instanceof RpcError) {
+    if (e.status === 429) c.header("Retry-After", "60");
+    return c.json({ error: e.message }, e.status);
+  }
   if (e instanceof InputError) return c.json({ error: e.message }, 400);
   if (e instanceof TokenCheckError) {
     if (e.status === 429) c.header("Retry-After", "60");

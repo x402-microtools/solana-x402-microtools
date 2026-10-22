@@ -1,6 +1,7 @@
 import { base58 } from "@scure/base";
 import { tokenCheckOutputSchema, tokenCheckQuerySchema, type TokenCheckOutput } from "./token-check-schemas";
 import { scoreTokenRisk } from "./token-check-scoring";
+import { rpc } from "./rpc";
 const CLASSIC_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 /** spl-token-2022 ExtensionType (repr u16), verified against solana-program/token-2022 interface/src/extension/mod.rs. */
@@ -28,34 +29,6 @@ export function parseTokenCheckQuery(query: URLSearchParams): { mint: string } {
   const parsed = tokenCheckQuerySchema.safeParse(input);
   if (!parsed.success) throw new TokenCheckError(400, "mint must be a canonical base58-encoded 32-byte Solana public key");
   return parsed.data;
-}
-type RpcResponse<T> = { jsonrpc: string; id: number; result?: T; error?: { code?: number; message?: string } };
-/**
- * rpcUrl may be a comma-separated list; endpoints are tried in order and the next one is used on
- * network errors, timeouts, HTTP 403/429/5xx or JSON-RPC errors (some public RPCs block Cloudflare Workers
- * or restrict getTokenLargestAccounts).
- */
-async function rpc<T>(rpcUrl: string, method: string, params: unknown[], timeoutMs = 4500): Promise<T> {
-  const urls = (rpcUrl ?? "").split(",").map((u) => u.trim()).filter(Boolean);
-  if (!urls.length || urls.some((u) => !u.startsWith("https://"))) throw new TokenCheckError(502, "Solana RPC is not configured");
-  let last: TokenCheckError = new TokenCheckError(502, "Solana RPC unavailable");
-  for (const url of urls) {
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch { last = new TokenCheckError(504, "Solana RPC connection failed or timed out"); continue; }
-    if (!res.ok) { last = new TokenCheckError(res.status === 429 ? 429 : 502, res.status === 429 ? "Solana RPC rate limited" : "Solana RPC returned an HTTP error"); continue; }
-    let json: RpcResponse<T>;
-    try { json = await res.json() as RpcResponse<T>; }
-    catch { last = new TokenCheckError(502, "Solana RPC returned invalid JSON"); continue; }
-    if (json?.error || json?.result === undefined || json?.result === null) { last = new TokenCheckError(502, "Solana RPC returned an error"); continue; }
-    return json.result;
-  }
-  throw last;
 }
 function publicKey(bytes: Uint8Array): string { return base58.encode(bytes); }
 function authority(bytes: Uint8Array, optionOffset: number, keyOffset: number): string | null {
