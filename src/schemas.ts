@@ -1,4 +1,5 @@
 import { CITIES, PAIRS } from "./inputs";
+import { tokenCheckInputJsonSchema, tokenCheckOutputJsonSchema } from "./token-check-schemas";
 const error = { type: "object", additionalProperties: false, required: ["error"], properties: { error: { type: "string" } } };
 const preflightInput = {
   type: "object", additionalProperties: false, required: ["url"],
@@ -36,9 +37,14 @@ const weatherOutput = { type: "object", required: ["location", "forecast", "attr
   } } }, attribution: { type: "string" }
 } };
 export const TOOLS = [
-  { id: "preflight", route: "/api/preflight", price: "$0.01", summary: "Probe one public HTTPS URL without following redirects; inspect x402 v2 challenge", input: preflightInput, output: preflightOutput, example: { url: "https://x402.org" } },
-  { id: "crypto", route: "/api/crypto", price: "$0.003", summary: "Indicative Solana Raydium AMM v4 vault ratios for SOL-USDC and RAY-USDC; not executable quotes or trending", input: cryptoInput, output: cryptoOutput, example: { pair: "SOL-USDC" } },
-  { id: "weather", route: "/api/weather", price: "$0.003", summary: "Next six forecast points for coordinates or a supported city, MET Norway CC BY 4.0", input: weatherInput, output: weatherOutput, example: { city: "london" } }
+  { id: "preflight", route: "/api/preflight", price: "$0.01", summary: "Probe one public HTTPS URL without following redirects; inspect x402 v2 challenge", input: preflightInput, output: preflightOutput, example: { url: "https://x402.org" },
+    outputExample: { target: "https://x402.org/", http_status: 200, latency_ms: 20, is_x402_v2: false, terms: null, checked_at: "2026-10-22T00:00:00Z" } },
+  { id: "crypto", route: "/api/crypto", price: "$0.003", summary: "Indicative Solana Raydium AMM v4 vault ratios for SOL-USDC and RAY-USDC; not executable quotes or trending", input: cryptoInput, output: cryptoOutput, example: { pair: "SOL-USDC" },
+    outputExample: { source: "solana_rpc", method: "indicative_vault_ratio", trending: false, pairs: [] } },
+  { id: "weather", route: "/api/weather", price: "$0.003", summary: "Next six forecast points for coordinates or a supported city, MET Norway CC BY 4.0", input: weatherInput, output: weatherOutput, example: { city: "london" },
+    outputExample: { location: { lat: 51.5074, lon: -0.1278, city: "london" }, forecast: [], attribution: "MET Norway (CC BY 4.0)" } },
+  { id: "token-check", route: "/api/token-check", price: "$0.01", summary: "Solana SPL / Token-2022 mint safety check: mint & freeze authority, risky Token-2022 extensions (permanent delegate, transfer hook, transfer fee, pausable, non-transferable), best-effort top-10 token-account concentration, heuristic risk score", input: tokenCheckInputJsonSchema, output: tokenCheckOutputJsonSchema, example: { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+    outputExample: { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", token_program: "spl-token", mint_authority: { revoked: false }, freeze_authority: { revoked: false }, concentration_status: "ok", risk_score: "high", risk_flags: [] } }
 ] as const;
 export function manifest(base: string, network: string, wallet: string) {
   return {
@@ -46,7 +52,7 @@ export function manifest(base: string, network: string, wallet: string) {
     payment: { network, scheme: "exact", asset: "USDC", payTo: wallet, currency: "USD", header: "PAYMENT-SIGNATURE" },
     docs: `${base}/openapi.json`, health: `${base}/health`,
     attribution: { weather: "Data from MET Norway, CC BY 4.0", crypto: "On-chain pool vault balances read via Solana JSON-RPC" },
-    limitations: ["Indicative reserves are not swap execution prices", "No dynamic trending, rankings or trading advice", "City lookup is a fixed list"],
+    limitations: ["Indicative reserves are not swap execution prices", "No dynamic trending, rankings or trading advice", "City lookup is a fixed list", "Token check is a heuristic, not an audit; concentration is best-effort via public RPC"],
     tools: TOOLS.map((x) => ({ id: x.id, method: "GET", url: `${base}${x.route}`, price: x.price, description: x.summary, inputSchema: x.input, outputSchema: x.output }))
   };
 }

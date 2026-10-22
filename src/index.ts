@@ -5,6 +5,7 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { InputError, parseCrypto, parsePreflight, parseWeather, type Pair } from "./inputs";
 import { TOOLS, manifest, openapi } from "./schemas";
+import { TokenCheckError, analyzeToken, parseTokenCheckQuery, readMintSnapshot, type MintSnapshot } from "./token-check";
 const DEVNET = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" as const;
 const MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" as const;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -21,7 +22,7 @@ interface Env {
   INBOUND_LIMIT: Limiter;
   UPSTREAM_LIMIT: Limiter;
 }
-type HonoEnv = { Bindings: Env };
+type HonoEnv = { Bindings: Env; Variables: { mintSnapshot?: MintSnapshot } };
 const app = new Hono<HonoEnv>();
 function config(e: Env): { network: `${string}:${string}`; payTo: string; facilitator: string } {
   if (e.NETWORK !== "mainnet" && e.NETWORK !== "devnet") throw new Error("NETWORK must be devnet or mainnet");
@@ -29,7 +30,7 @@ function config(e: Env): { network: `${string}:${string}`; payTo: string; facili
   if (!e.RATE_LIMIT_SALT || e.RATE_LIMIT_SALT.length < 32) throw new Error("Missing RATE_LIMIT_SALT (at least 32 characters)");
   if (!e.MET_CONTACT || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.MET_CONTACT)) throw new Error("MET_CONTACT must be a working contact email");
   if (!e.FACILITATOR_URL || !e.FACILITATOR_URL.startsWith("https://")) throw new Error("FACILITATOR_URL must be HTTPS");
-  if (!e.SOLANA_RPC_URL || !e.SOLANA_RPC_URL.startsWith("https://")) throw new Error("SOLANA_RPC_URL must be HTTPS");
+  if (!e.SOLANA_RPC_URL || e.SOLANA_RPC_URL.split(",").some((u) => !u.trim().startsWith("https://"))) throw new Error("SOLANA_RPC_URL must be HTTPS (comma-separated list allowed)");
   return { network: e.NETWORK === "devnet" ? DEVNET : MAINNET, payTo: e.PAY_TO_ADDRESS, facilitator: e.FACILITATOR_URL };
 }
 app.use("*", async (c, next) => {
@@ -56,18 +57,8 @@ app.get("/.well-known/x402.json", (c) => {
   return c.json(manifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
 });
 app.get("/openapi.json", (c) => c.json(openapi(new URL(c.req.url).origin)));
-app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nUse an x402 v2 Solana client. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
-app.use("/api/preflight", async (c, next) => { parsePreflight(new URL(c.req.url).searchParams); await next(); });
-app.use("/api/crypto", async (c, next) => { parseCrypto(new URL(c.req.url).searchParams); await next(); });
-app.use("/api/weather", async (c, next) => { parseWeather(new URL(c.req.url).searchParams); await next(); });
-async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
-  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
-  const encoded = new TextEncoder().encode(`${salt}|${ip}|${route}`);
-  const digest = await crypto.subtle.digest("SHA-256", encoded);
-  return Array.from(new Uint8Array(digest), (n) => n.toString(16).padStart(2, "0")).join("");
-}
+app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
 app.use("/api/*", async (c, next) => {
-  const cfg = config(c.env);
   const path = new URL(c.req.url).pathname;
   if (!TOOLS.some((x) => x.route === path)) return c.json({ error: "Unknown API route" }, 404);
   const key = await scopedKey(c, c.env.RATE_LIMIT_SALT, path);
@@ -76,6 +67,25 @@ app.use("/api/*", async (c, next) => {
     c.header("Retry-After", "60");
     return c.json({ error: "Rate limit exceeded" }, 429);
   }
+  await next();
+});
+app.use("/api/preflight", async (c, next) => { parsePreflight(new URL(c.req.url).searchParams); await next(); });
+app.use("/api/crypto", async (c, next) => { parseCrypto(new URL(c.req.url).searchParams); await next(); });
+app.use("/api/weather", async (c, next) => { parseWeather(new URL(c.req.url).searchParams); await next(); });
+// Free pre-payment check: malformed, missing or non-mint addresses get a 400 without a payment challenge (after the inbound rate limit).
+app.use("/api/token-check", async (c, next) => {
+  const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
+  c.set("mintSnapshot", await readMintSnapshot(c.env.SOLANA_RPC_URL, mint));
+  await next();
+});
+async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const encoded = new TextEncoder().encode(`${salt}|${ip}|${route}`);
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(digest), (n) => n.toString(16).padStart(2, "0")).join("");
+}
+app.use("/api/*", async (c, next) => {
+  const cfg = config(c.env);
   const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: cfg.facilitator }))
     .register(cfg.network, new ExactSvmScheme())
     .registerExtension(bazaarResourceServerExtension);
@@ -88,7 +98,7 @@ app.use("/api/*", async (c, next) => {
       extensions: declareDiscoveryExtension({
         input: tool.example,
         inputSchema: tool.input,
-        output: { example: tool.id === "preflight" ? { target: "https://x402.org/", http_status: 200, latency_ms: 20, is_x402_v2: false, terms: null, checked_at: "2026-10-22T00:00:00Z" } : tool.id === "crypto" ? { source: "solana_rpc", method: "indicative_vault_ratio", trending: false, pairs: [] } : { location: { lat: 51.5074, lon: -0.1278, city: "london" }, forecast: [], attribution: "MET Norway (CC BY 4.0)" }, schema: tool.output }
+        output: { example: tool.outputExample, schema: tool.output }
       })
     };
   }
@@ -156,14 +166,22 @@ async function solanaPools(rpcUrl: string, pair: Pair) {
   const pools = Object.entries(POOLS).filter(([key]) => pair === "all" || key === pair);
   const keys = pools.flatMap(([, p]) => [p.base, p.quote]);
   const request = { jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [keys, { encoding: "jsonParsed", commitment: "confirmed" }] };
-  let response: Response;
-  try { response = await fetch(rpcUrl, { method: "POST", signal: AbortSignal.timeout(4500), headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }); }
-  catch { throw new ApiError(504, "Solana RPC timed out"); }
-  if (!response.ok) throw new ApiError(response.status === 429 ? 429 : 502, "Solana RPC unavailable");
-  let json: unknown;
-  try { json = await response.json(); } catch { throw new ApiError(502, "Malformed RPC response"); }
-  const r = json as { result?: { context?: { slot?: number }; value?: Array<ParsedTokenAccount | null> }; error?: unknown };
-  if (r.error || !r.result?.context?.slot || !Array.isArray(r.result.value) || r.result.value.length !== keys.length) throw new ApiError(502, "Invalid RPC result");
+  // Try each configured RPC in order (public RPCs may block Cloudflare Workers or rate-limit).
+  type RpcResult = { result?: { context?: { slot?: number }; value?: Array<ParsedTokenAccount | null> }; error?: unknown };
+  let r: RpcResult | null = null;
+  let lastErr = new ApiError(502, "Solana RPC unavailable");
+  for (const url of rpcUrl.split(",").map((u) => u.trim()).filter(Boolean)) {
+    let response: Response;
+    try { response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(4500), headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }); }
+    catch { lastErr = new ApiError(504, "Solana RPC timed out"); continue; }
+    if (!response.ok) { lastErr = new ApiError(response.status === 429 ? 429 : 502, "Solana RPC unavailable"); continue; }
+    let json: unknown;
+    try { json = await response.json(); } catch { lastErr = new ApiError(502, "Malformed RPC response"); continue; }
+    const candidate = json as RpcResult;
+    if (candidate.error || !candidate.result?.context?.slot || !Array.isArray(candidate.result.value) || candidate.result.value.length !== keys.length) { lastErr = new ApiError(502, "Invalid RPC result"); continue; }
+    r = candidate; break;
+  }
+  if (!r || !r.result?.context?.slot || !Array.isArray(r.result.value)) throw lastErr;
   const mapped = mapPools(r.result.context.slot, r.result.value, pools);
   rpcCached.set(cacheKey, { until: now + 30000, payload: mapped });
   return mapped;
@@ -216,8 +234,18 @@ app.get("/api/weather", async (c) => {
   return c.json({ location: loc, forecast, attribution: "Data from MET Norway, CC BY 4.0 (https://api.met.no/)",
     note: "Forecast model estimates; not live observed weather", checked_at: new Date().toISOString() });
 });
+app.get("/api/token-check", async (c) => {
+  const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
+  await consumeUpstream(c, "token-check");
+  const snapshot = c.get("mintSnapshot") ?? await readMintSnapshot(c.env.SOLANA_RPC_URL, mint);
+  return c.json(await analyzeToken(c.env.SOLANA_RPC_URL, snapshot));
+});
 app.onError((e, c) => {
   if (e instanceof InputError) return c.json({ error: e.message }, 400);
+  if (e instanceof TokenCheckError) {
+    if (e.status === 429) c.header("Retry-After", "60");
+    return c.json({ error: e.message }, e.status);
+  }
   if (e instanceof ApiError) {
     if (e.status === 429) c.header("Retry-After", "60");
     return c.json({ error: e.message }, e.status);

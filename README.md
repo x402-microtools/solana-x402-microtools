@@ -1,6 +1,6 @@
 # Solana x402 Microtools
 
-Three small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
+Four small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
 
 - **Base URL:** `https://solana-x402-microtools-mainnet.valecity.workers.dev`
 - **Network:** `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (Solana mainnet)
@@ -16,10 +16,11 @@ Three small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [
 | `GET /api/preflight` | $0.01 (10000 atomic USDC) | `url` (required): a public `https://` URL |
 | `GET /api/crypto` | $0.003 (3000) | `pair` (optional): `SOL-USDC` (default), `RAY-USDC` or `all` |
 | `GET /api/weather` | $0.003 (3000) | **either** `city` **or** both `lat` and `lon` |
+| `GET /api/token-check` | $0.01 (10000) | `mint` (required): base58 SPL Token or Token-2022 mint address |
 
 Free routes: `GET /health`, `GET /.well-known/x402.json` (discovery manifest with JSON schemas), `GET /openapi.json`, `GET /llms.txt`.
 
-Inputs are validated **before** the payment challenge, so a bad request returns `400` and you are not charged. Unknown or duplicated query parameters are rejected.
+Inputs are validated **before** the payment challenge, so a bad request returns `400` and you are not charged. For `/api/token-check` this includes an on-chain lookup: a non-existent account, a wallet, or a token account (not a mint) gets a free `400`. Unknown or duplicated query parameters are rejected.
 
 ### `/api/preflight?url=…`
 Fetches the URL once (3.5 s timeout) **without following redirects** and without reading the body. It returns the HTTP status and latency, and, if the target answers `402` with an x402 v2 `PAYMENT-REQUIRED` header, the decoded terms (`scheme`, `network`, `asset`, `amount`, `payTo`) so an agent can check a price before paying.
@@ -39,6 +40,25 @@ Fetches the URL once (3.5 s timeout) **without following redirects** and without
 - **Coordinate form:** `?lat=51.5&lon=-0.12`. Each value can have up to 6 decimal places; latitude must be between -90 and 90 and longitude between -180 and 180.
 - Do not send `city` together with `lat`/`lon`.
 - Returns the next 6 forecast time steps: `time`, `temp_c`, `wind_mps`, `precipitation_mm_next_hour` and `symbol`.
+
+### `/api/token-check?mint=…`
+Reads the mint account from Solana mainnet and returns:
+- `token_program` (`spl-token` or `token-2022`), `supply_raw`, `supply_ui` and `decimals`.
+- `mint_authority` and `freeze_authority`: whether each is revoked, and the authority address if not.
+- `extensions_present`: the names of the Token-2022 extensions on the mint.
+- `risky_extensions`: each one is `true` only when it is effective, or an authority can switch it on:
+  - `transfer_fee`: the fee is above 0 bps, or a fee-config authority is set;
+  - `permanent_delegate`: a delegate is set;
+  - `transfer_hook`: a hook program or hook authority is set;
+  - `pausable`: a pause authority is set, or the mint is paused;
+  - `non_transferable`: the extension is present.
+- `top_10_token_accounts_share_pct`: the share of supply held by the 10 largest **token accounts**. These are not deduplicated into owners, and exchange or program vaults count. `concentration_status` is `ok`, `zero_supply` or `unavailable` (public RPCs often rate-limit this call; when that happens the rest of the result is still returned).
+- `risk_flags`, `risk_points` and `risk_score`. The score is `low` at 0 points, `medium` at 1-2 and `high` at 3 or more. Points:
+  - mint authority active +2, freeze authority active +2, zero supply +2;
+  - top-10 accounts hold 50-80% +1, or 80% or more +2;
+  - transfer fee +1, permanent delegate +3, transfer hook +2, pausable +2, non-transferable +3.
+
+This is a heuristic, not an audit. Regulated stablecoins such as USDC score `high` because their issuer keeps mint and freeze control, so read the flags rather than the label alone. Liquidity, metadata, holder identities and hook-program behaviour are not checked.
 
 ## Client examples
 
@@ -114,7 +134,7 @@ asyncio.run(main())
 ## Safety notes
 - **Use a dedicated, low-balance wallet** for paying agents. Fund it with a few cents of USDC; it does not need SOL for these calls, because the facilitator pays the network fee. Never point a client at your main wallet.
 - **Pin your policy.** The examples only pay this `payTo`, in mainnet USDC, up to a fixed atomic amount. Keep a filter like that.
-- **Payments are final.** With the `exact` scheme, if an upstream source (Solana RPC, MET Norway or the probed URL) fails after settlement, you may still be charged and get a `502`/`504`. There is no automatic refund.
+- **Failed calls are not settled.** The server verifies your payment, runs the tool, and only settles if the response is successful (2xx). If an upstream source (Solana RPC, MET Norway or the probed URL) fails and you get a `4xx`/`5xx`, the payment is not submitted. Settled payments are final.
 - **Crypto output is a pool reserve ratio, not an oracle.** It is the USDC vault balance divided by the base-token vault balance of one Raydium AMM v4 pool, read from public Solana RPC. It is not an executable quote, not a market-wide price, not "trending" data and not financial advice, and it can be stale or moved by large trades.
 - **Weather data is from MET Norway** ([api.met.no](https://api.met.no/)), licensed **CC BY 4.0**. Keep the attribution if you republish it. These are model forecasts, not live observations.
 - **Preflight** makes one unpaid request to the URL you supply. It never pays the target's 402.
@@ -122,7 +142,9 @@ asyncio.run(main())
 
 ## Status
 - **Verified mainnet paid call:** `GET /api/preflight?url=https://x402.org` paid $0.01 USDC and returned HTTP 200 with a `PAYMENT-RESPONSE` header, on 2026-10-22. Settlement tx: [`5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL`](https://solscan.io/tx/5GpQTrpqZL3E9ioZBn9TjqMFRYVaTq3K1yVYW6XvUWRBaZQXYfaRxyM2GC9unMsJWW2shivaTvFWPtUYxmzcCmNL). This was a self-test from the operator's own wallet.
+- **Verified mainnet paid call:** `GET /api/token-check?mint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` paid $0.01 USDC and returned HTTP 200 with `concentration_status: "ok"`, on 2026-10-22. Settlement tx: [`24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL`](https://solscan.io/tx/24W8cDYjQ8fRb8Zy8CbqdZgikocvKXAPmcQXy65yGW4XoHsRSDx8naKHX29iWSFakfqRowxHedQL2MwSRfVCBFkL). This was a self-test from the operator's own wallet.
 - `/api/crypto` and `/api/weather` return correct 402 challenges on mainnet. Their handlers were tested locally against live data, but neither has had a paid mainnet call yet.
+- Solana RPC: the server tries several public endpoints in order (`SOLANA_RPC_URL` is a comma-separated list), because `api.mainnet-beta.solana.com` blocks Cloudflare Workers.
 - Rate limits: 30 requests/min per client per route at the edge.
 
 ## Running your own copy

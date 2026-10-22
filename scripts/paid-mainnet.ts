@@ -12,8 +12,8 @@ const recipient = process.env.EXPECTED_PAY_TO;
 if (!url || !/^https?:\/\//.test(url) || (!key && !keyfile) || !recipient) {
   throw Error("Set API_URL, SOLANA_KEYPAIR_FILE (or SOLANA_PRIVATE_KEY in base58) for funded buyer wallet, EXPECTED_PAY_TO (mainnet recipient)");
 }
-const endpoint = new URL("/api/preflight", url);
-endpoint.searchParams.set("url", "https://x402.org");
+const endpoint = new URL(process.env.ENDPOINT_PATH ?? "/api/preflight", url);
+for (const [k, v] of new URLSearchParams(process.env.ENDPOINT_QUERY ?? "url=https://x402.org")) endpoint.searchParams.set(k, v);
 const secret = keyfile ? Uint8Array.from(JSON.parse(readFileSync(keyfile, "utf8")) as number[]) : base58.decode(key!);
 if (secret.length !== 64) throw Error("Solana keypair must be a 64-byte secret key");
 const signer = await createKeyPairSignerFromBytes(secret);
@@ -32,6 +32,7 @@ console.log("Received 402 challenge; now attempting ONE MAINNET USDC payment ($0
 const paid = await fetchPaid(endpoint.toString());
 const payload = await paid.text();
 console.log("HTTP status:", paid.status);
-console.log("PAYMENT-RESPONSE:", paid.headers.get("PAYMENT-RESPONSE") ? "present" : "absent");
+const pr = paid.headers.get("PAYMENT-RESPONSE");
+console.log("PAYMENT-RESPONSE:", pr ? Buffer.from(pr, "base64").toString() : "absent");
 console.log("Response:", payload.slice(0, 2000));
 if (paid.status !== 200 || !paid.headers.has("PAYMENT-RESPONSE")) process.exitCode = 1;

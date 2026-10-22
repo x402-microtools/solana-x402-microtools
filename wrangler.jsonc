@@ -16,7 +16,7 @@
       "vars": {
         "NETWORK": "devnet",
         "FACILITATOR_URL": "https://facilitator.payai.network",
-        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
+        "SOLANA_RPC_URL": "https://public.rpc.solanavibestation.com,https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com"
       }
     },
     "mainnet": {
@@ -28,7 +28,7 @@
       "vars": {
         "NETWORK": "mainnet",
         "FACILITATOR_URL": "https://facilitator.payai.network",
-        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
+        "SOLANA_RPC_URL": "https://public.rpc.solanavibestation.com,https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com"
       }
     }
   }

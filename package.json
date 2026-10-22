@@ -13,16 +13,17 @@
     "test:unpaid": "tsx scripts/unpaid.ts"
   },
   "dependencies": {
+    "@scure/base": "^2.4.0",
     "@x402/core": "2.28.0",
     "@x402/extensions": "2.28.0",
     "@x402/fetch": "2.28.0",
     "@x402/hono": "2.28.0",
     "@x402/svm": "2.28.0",
-    "hono": "^4.9.0"
+    "hono": "^4.9.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261022.1",
-    "@scure/base": "^2.0.0",
     "@solana-program/token": "^0.9.0",
     "@solana/kit": "^5.5.1",
     "@types/node": "^22.0.0",
