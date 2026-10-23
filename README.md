@@ -1,6 +1,6 @@
 # Solana x402 Microtools
 
-Five small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
+Six small pay-per-call HTTP APIs for AI agents and scripts, plus a free JSON-RPC 2.0 MCP discovery endpoint (`POST /mcp`). Payment uses the [x402](https://x402.org) v2 protocol: the first request gets `402 Payment Required`, your client pays in **USDC on Solana mainnet**, and the request is retried automatically. There are no accounts and no API keys.
 
 - **Base URL:** `https://solana-x402-microtools-mainnet.valecity.workers.dev`
 - **Network:** `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (Solana mainnet)
@@ -18,8 +18,9 @@ Five small pay-per-call HTTP APIs for AI agents and scripts. Payment uses the [x
 | `GET /api/weather` | $0.003 (3000) | **either** `city` **or** both `lat` and `lon` |
 | `GET /api/token-check` | $0.01 (10000) | `mint` (required): base58 SPL Token or Token-2022 mint address |
 | `POST /api/tx-preview` | $0.01 (10000) | JSON body: `transaction` (required, base64 or base58, unsigned or signed, legacy or v0, max 1232 bytes), `wallet`, `encoding`, `intent`, `context` (all optional) |
+| `GET /api/pool-pulse` | $0.003 (3000) | `window` (`15m` or `1h`, default `1h`), `limit` (`1`–`20`, default `10`), `min_liquidity_usd` (`0`–`1000000`, default `1000`), `dex` (`all`, `raydium`, `meteora`, `pumpswap`, default `all`) |
 
-Free routes: `GET /health`, `GET /.well-known/x402.json` (discovery manifest with JSON schemas), `GET /openapi.json`, `GET /llms.txt`.
+Free routes: `GET /health`, `GET /.well-known/x402.json` (discovery manifest with JSON schemas), `GET /.well-known/mcp.json`, `GET /mcp` and `POST /mcp` (JSON-RPC 2.0 MCP tool discovery), `GET /openapi.json`, `GET /llms.txt`.
 
 Inputs are validated **before** the payment challenge, so a bad request returns `400` and you are not charged. For `/api/token-check` this includes an on-chain lookup: a non-existent account, a wallet, or a token account (not a mint) gets a free `400`. Unknown or duplicated query parameters are rejected.
 
@@ -114,6 +115,15 @@ Free `400`s (no payment): non-JSON or non-`application/json` body (`415`), unkno
 A simulation that reports a transaction failure is still a paid `200` (the preview worked and told you it would fail). If every RPC is down you get `502`/`504` and are not charged.
 
 Limits: this is a point-in-time simulation. State can change before you sign, swap amounts can differ, and an unknown program can do things the red-flag rules do not recognise. Token changes only cover accounts owned by your wallet or fee payer. Never use it as the only check before autonomous signing. Not financial advice.
+
+### `/api/pool-pulse`
+Returns newly created Solana DEX pools (Raydium, Meteora, PumpSwap) created within `window` (`15m` or `1h`, default `1h`) with at least `min_liquidity_usd` (default `1000`), ranked descending by `activity_score` (`0`–`100`, `score_version: "1"`).
+- Each pool entry includes `pool_address`, `dex`, `base_mint`, `base_symbol`, `quote_mint`, `created_at`, `age_minutes`, `liquidity_usd`, `volume_5m_usd`, `buys_5m`, `sells_5m`, `net_buy_transactions_5m`, `price_change_5m_pct`, `activity_score`, `score_version`, and `observed_at`.
+- `coverage` reports `{ method: "sampled_public_feeds", exhaustive: false, candidate_count, truncated }`, along with `source` (`["geckoterminal", "dexscreener"]`), `fetched_at`, and `cache_age_seconds`.
+-Snapshots are cached for 45 seconds so polling agents get low-latency responses without rate-limiting upstream feeds. If upstream feeds are unavailable and no fresh snapshot exists, the endpoint returns `502`/`504` and cancels settlement.
+
+### `POST /mcp` & `GET /mcp` (Free MCP discovery)
+Stateless JSON-RPC 2.0 Model Context Protocol (MCP) endpoint supporting `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call` for all 6 tools (`solana_preflight`, `solana_crypto_market`, `weather_forecast`, `solana_token_check`, `solana_transaction_preview`, `solana_pool_pulse`).
 
 ## Client examples
 

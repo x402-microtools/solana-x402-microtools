@@ -4,6 +4,8 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { InputError, parseCrypto, parsePreflight, parseWeather, type Pair } from "./inputs";
+import { handleMcpRpcMessage, mcpManifest } from "./mcp";
+import { PoolPulseError, getPoolPulse, parsePoolPulseQuery } from "./pool-pulse";
 import { TOOLS, manifest, openapi } from "./schemas";
 import { TokenCheckError, analyzeToken, parseTokenCheckQuery, readMintSnapshot, type MintSnapshot } from "./token-check";
 import { RpcError } from "./rpc";
@@ -48,10 +50,20 @@ app.use("*", async (c, next) => {
   c.header("Referrer-Policy", "no-referrer");
 });
 app.use("*", async (c, next) => c.req.method === "HEAD" ? c.json({ error: "HEAD is disabled" }, 405) : next());
-/** Methods: POST only for the JSON-body routes (tx-preview), GET for everything else. */
+/** Methods: POST only for the JSON-body routes (tx-preview), GET/POST/OPTIONS for /mcp, GET for everything else. */
 const POST_ROUTES = new Set<string>(TOOLS.filter((t) => t.method === "POST").map((t) => t.route));
 app.use("*", async (c, next) => {
-  const post = POST_ROUTES.has(new URL(c.req.url).pathname);
+  const pathname = new URL(c.req.url).pathname;
+  if (pathname === "/mcp") {
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    c.header("Access-Control-Allow-Headers", "Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id");
+    if (c.req.method === "OPTIONS") return c.body(null, 204);
+    if (c.req.method === "GET" || c.req.method === "POST") return next();
+    c.header("Allow", "GET, POST, OPTIONS");
+    return c.json({ error: "Only GET, POST and OPTIONS are supported on /mcp" }, 405);
+  }
+  const post = POST_ROUTES.has(pathname);
   if (c.req.method === (post ? "POST" : "GET")) return next();
   c.header("Allow", post ? "POST" : "GET");
   return c.json({ error: post ? "Only POST with a JSON body is supported on this route" : "Only GET is supported" }, 405);
@@ -68,10 +80,51 @@ app.get("/.well-known/x402.json", (c) => {
   const cfg = config(c.env);
   return c.json(manifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
 });
+app.get("/.well-known/mcp.json", (c) => {
+  const cfg = config(c.env);
+  return c.json(mcpManifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
+});
+app.get("/mcp", (c) => {
+  const cfg = config(c.env);
+  return c.json(mcpManifest(new URL(c.req.url).origin, cfg.network, cfg.payTo));
+});
+app.post("/mcp", async (c) => {
+  const cfg = config(c.env);
+  const key = await scopedKey(c, c.env.RATE_LIMIT_SALT, "/mcp");
+  const rl = await c.env.INBOUND_LIMIT.limit({ key });
+  if (!rl.success) {
+    c.header("Retry-After", "60");
+    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "Rate limit exceeded" } }, 429);
+  }
+  const raw = await c.req.text();
+  if (raw.length > 16384) {
+    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request too large" } }, 413);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400);
+  }
+  const base = new URL(c.req.url).origin;
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0 || parsed.length > 20) {
+      return c.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid batch size" } }, 400);
+    }
+    const responses = parsed
+      .map((item) => handleMcpRpcMessage(item, base, cfg.network, cfg.payTo))
+      .filter((r): r is Record<string, unknown> => r !== null);
+    if (responses.length === 0) return c.body(null, 202);
+    return c.json(responses);
+  }
+  const reply = handleMcpRpcMessage(parsed, base, cfg.network, cfg.payTo);
+  if (reply === null) return c.body(null, 202);
+  return c.json(reply);
+});
 // 402index.io domain-ownership proof: SHA-256 hash of the claim token (the hash is public by design; the token is not).
 app.get("/.well-known/402index-verify.txt", (c) => c.text("a1755b244546bcb0ae550452fd7e9bf3a5f1ea29215b65d5a8dbeed41486b5ab"));
 app.get("/openapi.json", (c) => c.json(openapi(new URL(c.req.url).origin)));
-app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nPOST /api/tx-preview JSON {\"transaction\":\"<base64|base58 unsigned or signed tx>\",\"wallet\":\"<optional address>\"} ($0.01 USDC): simulate a Solana tx before signing; balance changes, programs, fee, red flags. Optional \"intent\":\"swap 0.002 SOL for USDC\" and \"context\":{\"type\":\"tokenized_equity\",\"ticker\":\"NVDAx\"} add a Pre-Sign Brief: verdict clear|caution|avoid, reasons, intent_match, verified xStocks check, priority fee (micro-lamports/CU), brief_hash\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
+app.get("/llms.txt", (c) => c.text("Solana x402 Microtools (x402 v2, exact USDC)\nGET /.well-known/x402.json for discovery metadata and JSON schemas\nGET /openapi.json for OpenAPI 3.1\nGET /mcp and POST /mcp for free JSON-RPC 2.0 MCP tool discovery\nGET /health for free liveness\nGET /api/preflight?url=... ($0.01 USDC)\nGET /api/crypto?pair=SOL-USDC|RAY-USDC|all ($0.003 USDC)\nGET /api/weather?city=london OR ?lat=51.5&lon=-0.1 ($0.003 USDC)\nGET /api/token-check?mint=<base58 SPL or Token-2022 mint> ($0.01 USDC)\nPOST /api/tx-preview JSON {\"transaction\":\"<base64|base58 unsigned or signed tx>\",\"wallet\":\"<optional address>\"} ($0.01 USDC): simulate a Solana tx before signing; balance changes, programs, fee, red flags. Optional \"intent\":\"swap 0.002 SOL for USDC\" and \"context\":{\"type\":\"tokenized_equity\",\"ticker\":\"NVDAx\"} add a Pre-Sign Brief: verdict clear|caution|avoid, reasons, intent_match, verified xStocks check, priority fee (micro-lamports/CU), brief_hash\nGET /api/pool-pulse?window=15m|1h&limit=10&min_liquidity_usd=1000&dex=all|raydium|meteora|pumpswap ($0.003 USDC): Solana new-pool momentum feed ranked by 5m volume/liquidity velocity, buys/sells, net buy flow and activity score (0-100)\nUse an x402 v2 Solana client. Bad input (incl. non-mint addresses) returns 400 before payment. No investment advice. Weather by MET Norway (CC BY 4.0).\n"));
 app.use("/api/*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
   if (!TOOLS.some((x) => x.route === path)) return c.json({ error: "Unknown API route" }, 404);
@@ -103,6 +156,10 @@ app.use("/api/tx-preview", async (c, next) => {
   const trimmed = raw.trim();
   const unpaidProbe = trimmed === "{}" && !c.req.header("PAYMENT-SIGNATURE") && !c.req.header("X-PAYMENT");
   if (trimmed.length > 0 && !unpaidProbe) c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), raw));
+  await next();
+});
+app.use("/api/pool-pulse", async (c, next) => {
+  parsePoolPulseQuery(new URL(c.req.url).searchParams);
   await next();
 });
 async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
@@ -270,8 +327,13 @@ app.post("/api/tx-preview", async (c) => {
   await consumeUpstream(c, "tx-preview");
   return c.json(await previewTransaction(rpcUrls(c.env), input));
 });
+app.get("/api/pool-pulse", async (c) => {
+  const query = parsePoolPulseQuery(new URL(c.req.url).searchParams);
+  await consumeUpstream(c, "pool-pulse");
+  return c.json(await getPoolPulse(query));
+});
 app.onError((e, c) => {
-  if (e instanceof TxPreviewError || e instanceof RpcError) {
+  if (e instanceof TxPreviewError || e instanceof RpcError || e instanceof PoolPulseError) {
     if (e.status === 429) c.header("Retry-After", "60");
     return c.json({ error: e.message }, e.status);
   }

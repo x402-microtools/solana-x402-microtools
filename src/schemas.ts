@@ -1,4 +1,5 @@
 import { CITIES, PAIRS } from "./inputs";
+import { poolPulseInputJsonSchema, poolPulseOutputJsonSchema } from "./pool-pulse-schemas";
 import { tokenCheckInputJsonSchema, tokenCheckOutputJsonSchema } from "./token-check-schemas";
 import { txPreviewInputJsonSchema, txPreviewOutputJsonSchema } from "./tx-preview";
 const error = { type: "object", additionalProperties: false, required: ["error"], properties: { error: { type: "string" } } };
@@ -52,15 +53,56 @@ export const TOOLS = [
       tokenized_equity: { checked_mints: [], claimed_mint: null, counterfeit_risk: false, reason: null }, priority_fee: null, brief_hash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", success: true, error: null, summary: "Would succeed. You send 0.001 SOL. Fee ~0.000005 SOL. No red flags.", wallet: "Aqgp4nKbk3WV1e7fLHepkcdwLLz3j8DwHqLTLHVEa6GK",
       sol_changes: [{ account: "Aqgp4nKbk3WV1e7fLHepkcdwLLz3j8DwHqLTLHVEa6GK", delta_lamports: "-1005000", delta_sol: "-0.001005", is_wallet: true }], token_changes: [],
       programs: [{ id: "11111111111111111111111111111111", name: "System", known: true, top_level: true }], red_flags: [], units_consumed: 150,
-      fee_estimate_lamports: "5000", fee_estimate_method: "rpc_simulation", source: "solana-mainnet-rpc simulateTransaction", fetched_at: "2026-10-22T00:00:00Z", disclaimer: "Simulation only" } }
+      fee_estimate_lamports: "5000", fee_estimate_method: "rpc_simulation", source: "solana-mainnet-rpc simulateTransaction", fetched_at: "2026-10-22T00:00:00Z", disclaimer: "Simulation only" } },
+  { id: "pool-pulse", method: "GET", route: "/api/pool-pulse", price: "$0.003", summary: "Solana new-pool momentum feed: newly created pools (Raydium, Meteora, PumpSwap) within 15m or 1h, ranked by 5m volume/liquidity velocity, buys/sells, net buy flow and activity score (0-100)", input: poolPulseInputJsonSchema, output: poolPulseOutputJsonSchema,
+    example: { window: "1h", limit: 10, min_liquidity_usd: 1000, dex: "all" },
+    outputExample: {
+      success: true,
+      network: "solana-mainnet",
+      window: "1h",
+      limit: 10,
+      min_liquidity_usd: 1000,
+      dex: "all",
+      count: 1,
+      pools: [
+        {
+          pool_address: "5vY3GEbRNMy1TEpEbjovagmgz858fzjScEpfW16JGsLb",
+          dex: "pumpswap",
+          base_mint: "GJHofzJ7FNkZAY832mbeJVp33vRQ4NZ2MJWuutWCBAGS",
+          base_symbol: "ORTHOG",
+          quote_mint: "So11111111111111111111111111111111111111112",
+          created_at: "2026-10-23T15:33:35.000Z",
+          age_minutes: 4.4,
+          liquidity_usd: 120624.6824,
+          volume_5m_usd: 7617.3562,
+          buys_5m: 43,
+          sells_5m: 18,
+          net_buy_transactions_5m: 25,
+          price_change_5m_pct: 14.066,
+          activity_score: 58,
+          score_version: "1",
+          observed_at: "2026-10-23T15:38:00.000Z"
+        }
+      ],
+      coverage: {
+        method: "sampled_public_feeds",
+        exhaustive: false,
+        candidate_count: 1,
+        truncated: false
+      },
+      source: ["geckoterminal", "dexscreener"],
+      fetched_at: "2026-10-23T15:38:00.000Z",
+      cache_age_seconds: 0,
+      disclaimer: "Sampled public DEX feed (not a full chain index). Newly created pools carry extreme rug, illiquidity and manipulation risk. Activity score measures 5m trading velocity and liquidity, not token safety. Pair with /api/token-check and /api/tx-preview before signing. Not financial advice."
+    } }
 ] as const;
 export function manifest(base: string, network: string, wallet: string) {
   return {
     name: "Solana x402 Microtools", version: "1.0.0", protocol: "x402", x402Version: 2,
     payment: { network, scheme: "exact", asset: "USDC", payTo: wallet, currency: "USD", header: "PAYMENT-SIGNATURE" },
-    docs: `${base}/openapi.json`, health: `${base}/health`,
-    attribution: { weather: "Data from MET Norway, CC BY 4.0", crypto: "On-chain pool vault balances read via Solana JSON-RPC" },
-    limitations: ["Indicative reserves are not swap execution prices", "No dynamic trending, rankings or trading advice", "City lookup is a fixed list", "Token check is a heuristic, not an audit; concentration is best-effort via public RPC", "Transaction preview is a point-in-time simulation; red flags are heuristics, not an audit"],
+    docs: `${base}/openapi.json`, health: `${base}/health`, mcp: `${base}/mcp`,
+    attribution: { weather: "Data from MET Norway, CC BY 4.0", crypto: "On-chain pool vault balances read via Solana JSON-RPC", "pool-pulse": "Sampled Solana new-pool feeds via GeckoTerminal and DexScreener public APIs" },
+    limitations: ["Indicative reserves are not swap execution prices", "No dynamic trending, rankings or trading advice", "City lookup is a fixed list", "Token check is a heuristic, not an audit; concentration is best-effort via public RPC", "Transaction preview is a point-in-time simulation; red flags are heuristics, not an audit", "Pool pulse is a sampled public DEX feed, not an exhaustive chain index or token safety audit"],
     tools: TOOLS.map((x) => ({ id: x.id, method: x.method, ...(x.method === "POST" ? { bodyType: "json" } : {}), url: `${base}${x.route}`, price: x.price, description: x.summary, inputSchema: x.input, outputSchema: x.output }))
   };
 }
@@ -84,5 +126,5 @@ export function openapi(base: string) {
     } };
   }
   paths["/health"] = { get: { summary: "Free readiness check (never paid)", responses: { "200": { description: "Ready" }, "503": { description: "Misconfigured" } } } };
-  return { openapi: "3.1.0", info: { title: "Solana x402 Microtools", version: "1.0.0", description: "Pay-per-call Solana mainnet x402 v2 microtools (USDC via PayAI): Pre-Sign Brief transaction simulation, SPL/Token-2022 mint safety check, x402 v2 challenge preflight, Raydium AMM v4 vault ratios, and MET Norway weather.", contact: { email: "valecity@mail.grokbot.com", url: "https://github.com/x402-microtools/solana-x402-microtools" } }, servers: [{ url: base }], paths };
+  return { openapi: "3.1.0", info: { title: "Solana x402 Microtools", version: "1.0.0", description: "Pay-per-call Solana mainnet x402 v2 microtools (USDC via PayAI): Pre-Sign Brief transaction simulation, SPL/Token-2022 mint safety check, Solana new-pool momentum feed (pool-pulse), x402 v2 challenge preflight, Raydium AMM v4 vault ratios, and MET Norway weather.", contact: { email: "valecity@mail.grokbot.com", url: "https://github.com/x402-microtools/solana-x402-microtools" } }, servers: [{ url: base }], paths };
 }
