@@ -73,7 +73,7 @@ export function openapi(base: string) {
       ? { requestBody: { required: true, content: { "application/json": { schema: tool.input, example: tool.example } } } }
       : { parameters: Object.entries(properties).map(([name, spec]) => ({ name, in: "query", required: required?.includes(name) ?? false, schema: spec })) };
     paths[tool.route] = { [tool.method.toLowerCase()]: {
-      operationId: tool.id, summary: tool.summary, ...request,
+      operationId: tool.id, summary: tool.summary, description: tool.summary, ...request,
       responses: {
         "200": { description: "Paid result", content: { "application/json": { schema: tool.output } } },
         "400": { description: "Bad input (free, before payment)", content: { "application/json": { schema: error } } },
@@ -84,5 +84,5 @@ export function openapi(base: string) {
     } };
   }
   paths["/health"] = { get: { summary: "Free readiness check (never paid)", responses: { "200": { description: "Ready" }, "503": { description: "Misconfigured" } } } };
-  return { openapi: "3.1.0", info: { title: "Solana x402 Microtools", version: "1.0.0" }, servers: [{ url: base }], paths };
+  return { openapi: "3.1.0", info: { title: "Solana x402 Microtools", version: "1.0.0", description: "Pay-per-call Solana mainnet x402 v2 microtools (USDC via PayAI): Pre-Sign Brief transaction simulation, SPL/Token-2022 mint safety check, x402 v2 challenge preflight, Raydium AMM v4 vault ratios, and MET Norway weather.", contact: { email: "valecity@mail.grokbot.com", url: "https://github.com/x402-microtools/solana-x402-microtools" } }, servers: [{ url: base }], paths };
 }
