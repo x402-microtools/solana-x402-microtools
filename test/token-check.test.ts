@@ -75,3 +75,11 @@ test("non-mint accounts are 400s", () => {
   assert.throws(() => parseMintBytes(MINT, 1, T22, t22([], 2)), (e: { status: number }) => e.status === 400);
   assert.throws(() => parseMintBytes(MINT, 1, CLASSIC, new Uint8Array(165)), (e: { status: number }) => e.status === 400);
 });
+import { TOOLS } from "../src/schemas";
+import { tokenCheckOutputSchema } from "../src/token-check-schemas";
+test("discovery outputExamples satisfy strict schemas and patterns", () => {
+  const tc = TOOLS.find((t) => t.id === "token-check")!;
+  assert.doesNotThrow(() => tokenCheckOutputSchema.parse(tc.outputExample));
+  const tp = TOOLS.find((t) => t.id === "tx-preview")!;
+  assert.match((tp.outputExample as { brief_hash: string }).brief_hash, /^sha256:[0-9a-f]{64}$/);
+});

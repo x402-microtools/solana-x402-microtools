@@ -50,8 +50,9 @@ export const tokenCheckOutputSchema = z.object({
 export type TokenCheckOutput = z.infer<typeof tokenCheckOutputSchema>;
 // JSON Schema counterparts for the existing OpenAPI and Bazaar discovery registry.
 const address = { type: "string", pattern: "^[1-9A-HJ-NP-Za-km-z]{32,44}$", description: "Canonical 32-byte Solana public key in base58" };
+const nullableAddress = { type: ["string", "null"], pattern: "^[1-9A-HJ-NP-Za-km-z]{32,44}$", description: "Canonical 32-byte Solana public key in base58" };
 const authority = { type: "object", additionalProperties: false, required: ["revoked", "address"], properties: {
-  revoked: { type: "boolean" }, address: { anyOf: [address, { type: "null" }] }
+  revoked: { type: "boolean" }, address: nullableAddress
 } };
 const u64String = { type: "string", pattern: "^[0-9]+$" };
 export const tokenCheckInputJsonSchema = {
@@ -72,7 +73,7 @@ export const tokenCheckOutputJsonSchema = {
     supply_raw: u64String, supply_ui: { type: "string", pattern: "^[0-9]+(\\.[0-9]+)?$" },
     decimals: { type: "integer", minimum: 0, maximum: 255 },
     top_10_token_accounts_share_pct: { type: ["number", "null"], minimum: 0, maximum: 100 },
-    top_10_token_accounts_balance_raw: { anyOf: [u64String, { type: "null" }] },
+    top_10_token_accounts_balance_raw: { type: ["string", "null"], pattern: "^[0-9]+$" },
     top_10_token_accounts_count: { type: ["integer", "null"], minimum: 0, maximum: 10 },
     concentration_status: { type: "string", enum: ["ok", "zero_supply", "unavailable"] },
     risky_extensions: { type: "object", additionalProperties: false, required: ["transfer_fee", "permanent_delegate", "transfer_hook", "non_transferable", "pausable"],

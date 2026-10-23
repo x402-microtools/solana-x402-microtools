@@ -83,22 +83,26 @@ app.use("/api/*", async (c, next) => {
   }
   await next();
 });
-app.use("/api/preflight", async (c, next) => { parsePreflight(new URL(c.req.url).searchParams); await next(); });
+// Free pre-payment checks: bad query/body inputs get a 400 before payment. A bare URL with NO query string (or an
+// empty/{} POST body) is treated as a directory discovery probe (PayAI /verify, x402scan, 402index, CDP validate):
+// it gets the 402 challenge so the route can be indexed, and can never be charged because the route handler still
+// validates and returns 400 (cancelling x402 settlement on >= 400).
+const hasQuery = (url: string) => new URL(url).search.length > 1;
+app.use("/api/preflight", async (c, next) => { if (hasQuery(c.req.url)) parsePreflight(new URL(c.req.url).searchParams); await next(); });
 app.use("/api/crypto", async (c, next) => { parseCrypto(new URL(c.req.url).searchParams); await next(); });
-app.use("/api/weather", async (c, next) => { parseWeather(new URL(c.req.url).searchParams); await next(); });
-// Free pre-payment check: malformed, missing or non-mint addresses get a 400 without a payment challenge (after the inbound rate limit).
+app.use("/api/weather", async (c, next) => { if (hasQuery(c.req.url)) parseWeather(new URL(c.req.url).searchParams); await next(); });
 app.use("/api/token-check", async (c, next) => {
-  const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
-  c.set("mintSnapshot", await readMintSnapshot(rpcUrls(c.env), mint));
+  if (hasQuery(c.req.url)) {
+    const { mint } = parseTokenCheckQuery(new URL(c.req.url).searchParams);
+    c.set("mintSnapshot", await readMintSnapshot(rpcUrls(c.env), mint));
+  }
   await next();
 });
-// Free pre-payment check: body read ONCE here (Hono caches it, so x402 and the handler can re-read); malformed JSON,
-// bad encodings and structurally invalid transactions get a 400 without a payment challenge. No network calls.
-// An EMPTY body is treated as a discovery probe (x402scan/402index): it gets the 402 challenge so the route can be
-// listed. It can never be charged: the handler then returns 400, and the x402 middleware cancels settlement on >= 400.
 app.use("/api/tx-preview", async (c, next) => {
   const raw = await c.req.text();
-  if (raw.trim().length > 0) c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), raw));
+  const trimmed = raw.trim();
+  const unpaidProbe = trimmed === "{}" && !c.req.header("PAYMENT-SIGNATURE") && !c.req.header("X-PAYMENT");
+  if (trimmed.length > 0 && !unpaidProbe) c.set("txPreview", parseTxPreviewBody(c.req.header("Content-Type"), raw));
   await next();
 });
 async function scopedKey(c: { req: { header(name: string): string | undefined } }, salt: string, route: string): Promise<string> {
